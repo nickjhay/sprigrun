@@ -1,0 +1,6 @@
+/r/* /index.html 200
+/w/* /index.html 200
+/run/* /index.html 200
+/workspace /index.html 200
+/channels /channels.html 200
+/c/* /channels.html 200

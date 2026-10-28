@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#f5f5ef"><meta name="referrer" content="no-referrer">
+<title>Sprig — channels</title><link rel="icon" href="/sprig.svg" type="image/svg+xml">
+<!-- BUILD_ASSETS -->
+</head><body>
+<header class="site-header"><a class="brand" href="/"><img src="/sprig.svg" alt="" width="34" height="34"><span>sprig<span class="brand-divider">/</span><span class="brand-sub">channels</span></span></a><a class="button quiet" href="/">Back to the workbench ↗</a></header>
+<main class="channel-main">
+  <section class="intro"><div><div class="eyebrow">A FEW WORDS BETWEEN WORLDS.</div><h1>Leave a little trace.</h1><p>A shared stream of text. Messages fade; the conversation moves on.</p></div><button id="new-channel" class="button">New channel ＋</button></section>
+  <div id="channel-notice" class="notice" role="status" aria-live="polite">Create a channel, or open an invitation.</div>
+  <div class="channel-layout">
+    <section class="channel-room" aria-label="Channel messages">
+      <div class="channel-heading"><span class="dot"></span><h2 id="room-title">An empty clearing.</h2><span id="channel-state" class="badge neutral">NOT CONNECTED</span></div>
+      <div id="channel-meta" class="channel-meta">Anyone with a reading link can see the messages.</div>
+      <ol id="messages" class="channel-messages" tabindex="0" aria-label="Messages" aria-live="off"><li class="empty-room">A place for a small conversation.</li></ol>
+      <form id="message-form" class="channel-compose"><label for="message-text">Your message</label><textarea id="message-text" rows="3" maxlength="8192" placeholder="Something to send across the clearing…" disabled></textarea><div class="compose-actions"><span id="message-bytes">0 / 8192 bytes</span><button id="send-message" class="button" disabled>Send ↵</button></div></form>
+    </section>
+    <aside class="channel-controls">
+      <section class="connection-card"><h2>Find a channel</h2><form id="join-form"><label for="channel-address">Address or invitation link</label><input id="channel-address" class="channel-input" autocomplete="off" spellcheck="false" placeholder="Paste a link or address"><button class="button small" type="submit">Open channel</button></form><div class="channel-buttons"><button id="reconnect-channel" class="text-button" disabled>Reconnect</button><button id="disconnect-channel" class="text-button" disabled>Disconnect</button></div></section>
+      <section id="channel-sharing" class="publish-card" hidden><div class="card-eyebrow">INVITE SOMEONE IN</div><h2>A link to listen.<br>A key to join in.</h2><p>Readers can follow the conversation. Participants can also post, including messages that push older ones out.</p><button id="copy-read-link" class="button">Copy reading link</button><button id="copy-write-link" class="button" hidden>Copy participant link</button><button id="save-channel-key" class="text-button" hidden>Save posting key</button><p id="key-note" class="helper"></p></section>
+      <section class="connection-card"><h2>Channel service</h2><label for="channel-service">Service address</label><input id="channel-service" class="channel-input" type="url" autocomplete="off" spellcheck="false"><button id="set-channel-service" class="button small">Use this service</button><a id="channel-stats" class="text-link" target="_blank" rel="noopener noreferrer">View status ↗</a></section>
+      <p class="helper">This terminal exchanges plain text. Messages do not run code or identify their author. Your Moss programs do not receive channel access.</p>
+    </aside>
+  </div>
+  <footer><span>Showing at most 256 received messages and 256 KiB in this tab.</span><span>Keep what matters elsewhere.</span></footer>
+</main><noscript>This channel terminal needs JavaScript.</noscript></body></html>

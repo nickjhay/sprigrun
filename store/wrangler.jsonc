@@ -1,0 +1,47 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "bounded-blob-store-v05",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  // Per-invocation CPU guard; this is not a total request/spending limit.
+  "limits": { "cpu_ms": 100 },
+  "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "world-source-blobs-v05" }],
+  "durable_objects": {
+    "bindings": [{ "name": "STORE", "class_name": "StoreCoordinator" }]
+  },
+  "exports": {
+    "StoreCoordinator": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "ratelimits": [{
+    "name": "UPLOAD_RATE_LIMITER",
+    "namespace_id": "1001",
+    "simple": { "limit": 20, "period": 60 }
+  }],
+  "vars": {
+    "MAX_BLOB_BYTES": "262144",
+    "MINIMUM_DEBIT_BYTES": "8192",
+    "LONG_REFILL_BYTES_PER_DAY": "104857600",
+    "LONG_CAPACITY_BYTES": "209715200",
+    "BURST_REFILL_BYTES_PER_HOUR": "8388608",
+    "BURST_CAPACITY_BYTES": "8388608",
+    "ATTEMPTS_PER_MINUTE": "30",
+    "ATTEMPT_CAPACITY": "30",
+    "CHALLENGES_PER_MINUTE": "30",
+    "CHALLENGE_BURST": "30",
+    "CHALLENGE_CAPACITY": "512",
+    "CHALLENGE_TTL_SECONDS": "600",
+    "UPLOAD_TIMEOUT_MS": "10000",
+    "VALIDATION_POLICY": "utf8-v1",
+    // Expected work = 2^BITS + source_bytes * PER_BYTE. 0,0 means one trial.
+    // Tickets remain single-use even when work is trivial. Overrides persist.
+    "PROOF_OF_WORK_BITS": "0",
+    "PROOF_OF_WORK_PER_BYTE": "0",
+    "BROWSER_CACHE_SECONDS": "31536000",
+  },
+  // Add when your domain is an active Cloudflare zone:
+  // "routes": [{ "pattern": "blobs.example.com", "custom_domain": true }],
+  // Logs deliberately omit blob contents, tokens and client IPs.
+  "observability": { "enabled": false }
+}

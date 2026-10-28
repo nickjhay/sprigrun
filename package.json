@@ -1,0 +1,28 @@
+{
+  "name": "sprig-workbench",
+  "version": "0.4.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/dev.mjs",
+    "typecheck": "tsc --noEmit && tsc -p channels/tsconfig.json --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "check": "npm run typecheck && npm test && npm run test:store && npm run test:channels && npm run build",
+    "test:store": "node --test test/store.integration.mjs",
+    "seed": "node scripts/seed.mjs",
+    "test:channels": "node --test --test-concurrency=1 channels/test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261026.1",
+    "@types/node": "26.6.5",
+    "esbuild": "0.28.2",
+    "jsonc-parser": "3.3.1",
+    "linkedom": "0.18.14",
+    "miniflare": "5.20261023.0-beta",
+    "typescript": "5.9.3"
+  }
+}

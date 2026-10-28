@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#f5f5ef"><meta name="referrer" content="no-referrer">
+<title>Sprig — a place for small programs</title>
+<meta name="description" content="A quiet workbench for writing, keeping and sharing Program source.">
+<link rel="icon" href="/sprig.svg" type="image/svg+xml">
+<!-- BUILD_ASSETS -->
+</head>
+<body>
+<header class="site-header">
+  <a class="brand" href="/" aria-label="Sprig home"><img src="/sprig.svg" alt="" width="34" height="34"><span>sprig<span class="brand-divider">/</span><span class="brand-sub">workbench</span></span></a>
+  <div class="header-note"><span class="dot"></span><span id="environment">A place for small programs.</span></div>
+  <a class="button quiet" href="/channels">Channels ↗</a>
+  <a class="button quiet" href="/workspace">Open overlay ↗</a>
+  <button id="open-file" class="button quiet"><span aria-hidden="true">↥</span> Open file</button>
+  <input type="file" id="file-input" accept=".moss,.sprig,.py,.txt,text/plain" hidden>
+</header>
+<main id="home">
+  <section class="intro" aria-label="Introduction">
+    <div><div class="eyebrow">WRITE SOMETHING. SEE WHERE IT GOES.</div><h1>A small beginning.</h1><p>Source you can keep, share, and build upon.</p></div>
+    <div class="intro-actions"><button id="new-source" class="text-button">New source <span aria-hidden="true">↗</span></button><span class="small-rule"></span><label for="examples" class="sr-only">Try an example</label><select id="examples"><option value="">Try an example</option><option value="fern">A little fern</option><option value="fern-graft">A grafted fern</option><option value="first">Hello, Moss</option><option value="world">Numbers &amp; strings</option><option value="library">A graftable library</option><option value="graft">A grafted postcard</option></select></div>
+  </section>
+  <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+  <div class="workbench">
+    <section class="source-pane" aria-label="Source editor">
+      <div class="editor-toolbar">
+        <div class="file-heading"><span class="file-mark" aria-hidden="true">◧</span><label for="filename" class="sr-only">Filename</label><input id="filename" value="hello.moss" maxlength="100" spellcheck="false"><span id="doc-state" class="badge">DRAFT</span></div>
+        <div class="editor-actions"><button id="fork" class="button small" hidden>Edit a copy</button><button id="download" class="icon-button" title="Download source (Ctrl/Cmd+S)" aria-label="Download source">↓</button><span class="vertical-rule"></span><button id="run" class="button run-button" disabled aria-describedby="runtime-description"><span aria-hidden="true">▷</span> Run</button><button id="stop-run" class="button small" hidden>Stop</button></div>
+      </div>
+      <div class="editor-wrap"><div class="gutter" aria-hidden="true"><pre id="line-numbers"></pre></div><label for="source" class="sr-only">Program source</label><textarea id="source" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" aria-describedby="editor-help"></textarea></div>
+      <div class="editor-status"><span id="position">Ln 1, Col 1</span><span class="status-right"><span id="byte-count">0 bytes</span><span class="status-dot">·</span><span id="encoding">UTF-8</span><span class="status-dot">·</span><span id="draft-status">Local draft</span></span></div>
+      <section class="output-section" aria-label="Program output"><div class="output-heading"><span>Terminal</span><span id="run-state" class="subtle">No run yet</span><button id="clear-output" class="text-button">Clear</button></div><pre id="output" tabindex="0" aria-live="off">Your program’s output will appear here.</pre><form id="terminal-form" hidden><label for="terminal-input" class="sr-only">Program input</label><span aria-hidden="true">›</span><input id="terminal-input" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="Reply to the program…"><button type="submit" class="button small">Send ↵</button></form></section>
+    </section>
+    <aside class="sidebar" aria-label="Publishing and runtime">
+      <section class="publish-card">
+        <div class="card-eyebrow"><span class="number">01</span> KEEP A SNAPSHOT</div>
+        <h2>Small source.<br>A lasting address.</h2>
+        <p>Publish these exact bytes. Anyone with the link can read the source and make it their own.</p>
+        <button id="publish" class="button primary" disabled>Publish source <span aria-hidden="true">↗</span></button>
+        <button id="cancel-publish" class="text-button" hidden>Cancel publishing</button>
+        <div class="publish-caption">Public by link. Retention isn’t guaranteed.</div>
+        <div id="published" class="published" hidden><div class="published-label"><span class="dot"></span><span id="published-state">Published snapshot</span></div><code id="published-address"></code><button id="copy-link" class="button small">Copy share link</button><a id="open-link" target="_blank" rel="noopener noreferrer">Open ↗</a></div>
+      </section>
+      <section class="connection-card">
+        <div class="card-title"><h2>Blob store</h2><span id="connection-state" class="badge neutral">NOT SET</span></div>
+        <label for="store-url">Store address</label><div class="store-row"><input type="url" id="store-url" placeholder="https://store.sprig.run" autocomplete="off" spellcheck="false"><button id="connect-store" class="button small">Use</button></div>
+        <p class="helper">Connect your source store to publish and open shared programs.</p>
+        <a id="store-stats" class="text-link" target="_blank" rel="noopener noreferrer" hidden>View store status ↗</a>
+        <details class="open-address"><summary>Open a source address</summary><label for="address-input" class="sr-only">SHA-256 and byte length</label><input id="address-input" placeholder="hash_length" spellcheck="false"><button id="load-address" class="button small">Open source</button></details>
+      </section>
+      <section class="runtime-card"><div class="card-title"><h2>Execution</h2><span id="runtime-state" class="badge neutral">NOT CONNECTED</span></div><p id="runtime-description">Moss is a small test language. Arithmetic, strings, print, input, and grafts from the source store.</p><div class="runtime-limits"><span>Fresh worker per run</span><span>Bounded compute &amp; I/O</span></div></section>
+      <div class="quiet-note"><span aria-hidden="true">✳</span><p>A shared program is a beginning,<br>not an instruction to trust it.</p></div>
+    </aside>
+  </div>
+  <footer><span id="editor-help">Tab indents. Esc, then Tab leaves the editor.</span><span>Drafts stay local. Published source is public.</span></footer>
+</main>
+<section id="stage" class="stage" aria-label="Running program" hidden>
+  <header class="stage-header"><a class="stage-brand" href="/" aria-label="Sprig workbench"><img src="/sprig.svg" alt="" width="24" height="24"></a><div class="stage-heading"><span id="stage-title">Program</span><span>Moss / 1</span></div><div id="stage-actions" class="stage-actions"></div></header>
+  <div id="stage-output" class="stage-output"></div>
+  <div id="stage-notice"></div>
+  <footer class="stage-footer"><span id="run-basis">Ready when you are.</span><a id="stage-editor-link" hidden>Open editor ↗</a></footer>
+</section>
+<aside id="overlay" class="overlay" aria-label="Sprig editor" hidden>
+  <button id="overlay-toggle" class="overlay-toggle" aria-controls="overlay-panel" aria-expanded="false" aria-label="Open editor"><img src="/sprig.svg" alt="" width="23" height="23"><span>sprig</span><span id="overlay-arrow" aria-hidden="true">⌄</span></button>
+  <section id="overlay-panel" class="overlay-panel" aria-label="Editor tools" hidden>
+    <header class="overlay-heading"><div class="identity"><button id="hash-badge" class="hash-badge" hidden><code id="hash-grid" aria-hidden="true"></code></button><div id="identity-empty" class="identity-empty" aria-hidden="true">✳</div><div><span id="identity-label">Local draft</span><span id="identity-bytes"></span></div></div><nav class="overlay-links" aria-label="Program views"><a id="direct-link" target="_blank" rel="noopener noreferrer" hidden>Open directly ↗</a><a href="/">Workbench ↗</a></nav></header>
+    <div id="overlay-source"></div>
+    <details class="overlay-details"><summary>Share &amp; store</summary><div id="overlay-sidebar"></div></details>
+    <div id="overlay-file-actions" class="overlay-file-actions"></div>
+    <div id="overlay-help" class="overlay-help"></div>
+  </section>
+</aside>
+<noscript>This workbench needs JavaScript to edit, verify and publish source.</noscript>
+</body></html>

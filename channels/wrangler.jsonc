@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sprig-channels-v1",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "limits": { "cpu_ms": 100 },
+  "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "ChannelHub" }] },
+  "exports": { "ChannelHub": { "type": "durable-object", "storage": "sqlite" } },
+  "ratelimits": [{ "name": "REQUEST_LIMITER", "namespace_id": "2001", "simple": { "limit": 120, "period": 60 } }],
+  "vars": {
+    "MAX_MESSAGE_BYTES": "8192", "CHANNEL_BYTES": "262144", "CHANNEL_MESSAGES": "256",
+    "MESSAGE_AGE_SECONDS": "3600", "CHANNEL_LIFETIME_SECONDS": "86400", "MAX_CHANNELS": "1000",
+    "CREATES_PER_DAY": "100", "CREATE_BURST": "100",
+    "REQUESTS_PER_MINUTE": "600", "REQUEST_BURST": "120",
+    "CHALLENGES_PER_MINUTE": "60", "CHALLENGE_BURST": "60", "MAX_TICKETS": "512", "TICKET_SECONDS": "120",
+    "INGRESS_BYTES_PER_DAY": "104857600", "INGRESS_CAPACITY_BYTES": "209715200",
+    "BURST_BYTES_PER_HOUR": "8388608", "BURST_CAPACITY_BYTES": "8388608",
+    "DELIVERY_BYTES_PER_DAY": "419430400", "DELIVERY_CAPACITY_BYTES": "838860800",
+    "DELIVERY_BYTES_PER_HOUR": "16777216", "DELIVERY_BURST_BYTES": "16777216",
+    "MAX_SUBSCRIPTIONS": "256", "CHANNEL_SUBSCRIPTIONS": "16", "SUBSCRIPTION_SECONDS": "300", "ACK_SECONDS": "15",
+    "UPLOAD_TIMEOUT_MS": "10000", "CREATE_POW_BITS": "0", "APPEND_POW_BITS": "0", "POW_PER_BYTE": "0"
+  },
+  // Optional, after adding the domain to Cloudflare:
+  // "routes": [{ "pattern": "channels.sprig.run", "custom_domain": true }],
+  "observability": { "enabled": false }
+}

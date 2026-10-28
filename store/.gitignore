@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.env
+*.log
+coverage/
+*.zip
+__pycache__/
+*.pyc
+*.secret.json

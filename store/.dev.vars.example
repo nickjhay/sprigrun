@@ -1,0 +1,3 @@
+# Copy to .dev.vars for LOCAL use. Never commit .dev.vars.
+# Generate your own token with: node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+# ADMIN_TOKEN=<paste-your-generated-token-here>
