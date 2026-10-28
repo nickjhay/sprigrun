@@ -10,16 +10,20 @@ The separate **public, expiring channel** service from 0.3 remains included: cre
 
 ## Run the whole system locally
 
-Install Node **24.22.1 or later in the Node 24 series** (`.nvmrc` pins the version used by CI), then:
+Use Node **24** (`.nvmrc` pins the version used by CI). With [nvm](https://github.com/nvm-sh/nvm), run:
 
 ```sh
 git clone https://github.com/nickjhay/sprigrun.git
 cd sprigrun
+nvm install
+nvm use
 npm ci
 npm run dev
 ```
 
-If you are using a downloaded source archive, open its project directory and run the last two commands.
+Without nvm, install Node 24 and check that `node --version` reports `v24.x` before running `npm ci` and `npm run dev`. If you are using a downloaded source archive, open its project directory and follow the same Node setup and npm commands.
+
+If startup reports `ERR_UNKNOWN_FILE_EXTENSION` for a `.ts` file, check `node --version` **in that terminal**. The local launcher imports TypeScript directly and needs a recent Node runtime; Node 21 cannot run it. `.nvmrc` does not switch Node automatically: run `nvm install` and `nvm use`, then `npm ci` again. Dependency installation now enforces the declared Node requirement, and `npm run dev` checks the version before loading the launcher.
 
 Open **http://localhost:5173/**. Click **Run**, type a reply into the terminal, and press Enter. Everything is local; no Cloudflare account is required. The first dependency installation needs internet access.
 
