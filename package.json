@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "predev": "node scripts/check-node.mjs",
     "dev": "node scripts/dev.mjs",
     "typecheck": "tsc --noEmit && tsc -p channels/tsconfig.json --noEmit",
     "test": "node --test test/*.test.mjs",
