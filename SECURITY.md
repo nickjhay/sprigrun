@@ -2,6 +2,10 @@
 
 This is an implementation review of the workbench and Moss toy runtime, not a certification of a future Sprig VM.
 
+[THREATS.md](THREATS.md) maps the service threats and core invariants to code and
+evidence. [Store operations](store/OPERATIONS.md) covers deployment rehearsal and
+the separate, still-unimplemented backup/restore obligations.
+
 Release 0.4 changes host presentation and adds direct/draft routes. Both program views verify the same source bytes and require explicit Run. Invalid/unavailable links leave execution and publication disabled and do not overwrite the local draft. The digest badge encodes all 256 bits reversibly, copies the existing canonical hash_length, and is hidden for changed unpublished bytes. It is not a new store addressing or authorization scheme.
 
 Restart advances the host run generation before canceling the old worker. The existing WorkerJob and RunSession reject stale traffic before invoking output/input hooks; an additional generation check guards terminal rendering. The editor DOM node is retained across collapse and restart. UI controls are host-owned: this prototype does not implement two Sprig UI capabilities or generic guest widget production. Its LinkeDOM tests use fake worker endpoints and emulated focus/selection, so they are controller checks, not browser sandbox or layout tests.

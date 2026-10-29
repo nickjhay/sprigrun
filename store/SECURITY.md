@@ -4,6 +4,12 @@ This release uses `hash_length` addresses and bounded outstanding challenges.
 The review covers code, emulated Cloudflare integration and failure injection;
 it is not an independent audit or a claim about a deployed configuration.
 
+The October 29 [threat model](../THREATS.md) maps the critical invariants to their
+implementation and distinguishes byte integrity, recoverability and history.
+[OPERATIONS.md](OPERATIONS.md) supplies a disposable deployment rehearsal; local
+restart checks do not establish cloud recovery or bounded bills. The store still
+has no independent backup/restore or authoritative submission order/time journal.
+
 ## Admission and proof invariants
 
 - Ticket IDs are random 256-bit values. Authoritative address, expiry and target

@@ -17,6 +17,12 @@ Change the `left`, `right`, and `spine` words in the self-contained example to g
 
 ## Seeds for later
 
+Nick has welcomed a small Easter egg whenever one feels right. Keep it optional,
+discoverable and outside storage, proof, admission, timing and authority semantics.
+A quiet workbench or local-demo detail is a natural home; no hidden network calls,
+changes to published bytes or surprises in recovery behavior. The invitation is
+banked, not a feature we need to squeeze into the deployment work.
+
 The hash garden remains a design study: an 8 × 8 grid of hex digits in an 8 × 8 pixel font, a 16-colour palette, and complementary foreground/background indices `n` and `n XOR 15`. Seasonal a–f pictures make a small artistic challenge. A bounded local search could look for pleasing hashes by varying an ignored source comment.
 
 The fuller fern world will need graphical UI and the Sprig runtime. The resident here is a terminal sketch that can already be edited, run, published and grafted.

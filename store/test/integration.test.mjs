@@ -26,9 +26,10 @@ before(async () => {
     format: 'esm', platform: 'neutral', external: ['cloudflare:workers', 'node:crypto'] });
 });
 
-function start(bindings = {}, persist, production = false) {
+function start(bindings = {}, persist, production = false, port) {
   const vars = Object.fromEntries(Object.entries({ ...BINDINGS, ...bindings }).map(([key, value]) => [key, { type: 'text', value }]));
   return new Miniflare({
+    ...(port === undefined ? {} : { port }),
     ...(persist ? { resourcePersistencePath: persist } : {}),
     cf: false, log: new Log(LogLevel.ERROR), telemetry: { enabled: false },
     workers: [{ config: {
@@ -510,6 +511,9 @@ test('real upload, smoke and admin CLIs work against the production entrypoint',
   assert.deepEqual(Buffer.from(await (await fetch(`${base}/b/${hash(bytes)}`)).arrayBuffer()),bytes);
   assert.match((await run(process.execPath,['scripts/smoke.mjs'],options)).stdout,/Verified challenge/);
   assert.match((await run(process.execPath,['scripts/admin.mjs','pow','default'],options)).stdout,/"proof_of_work_bits":0/);
+  assert.match((await run(process.execPath,['scripts/admin.mjs','pause'],{
+    env:{...options.env,BLOB_STORE_ADMIN_TOKEN:undefined,ADMIN_TOKEN:TOKEN},
+  })).stdout,/"uploads_paused":true/);
   await assert.rejects(run(process.execPath,['scripts/admin.mjs','pow','257'],options));
 });
 
@@ -539,4 +543,47 @@ test('read length mismatches fail before GET/HEAD conditional success',async t=>
   const address=`${digestOf('x')}_2`;
   await bucket.put(`b/${address}`,'x',{customMetadata:{kind:'blob',validation_policy:'utf8-v1'}});
   for (const method of ['GET','HEAD']) assert.equal((await request(mf,`/b/${address}`,{method,headers:{'If-None-Match':'*'}})).status,503);
+});
+
+test('deployment rehearsal refuses missing consent, credentials and a production-sized profile', async t => {
+  const mf = use(t, { LONG_CAPACITY_BYTES: '209715200' }, true);
+  const base = (await mf.ready).origin;
+  const dir = await mkdtemp(join(tmpdir(), 'rehearsal-guards-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'state.json');
+  const env = { ...process.env, BLOB_STORE_URL: base, BLOB_STORE_ADMIN_TOKEN: TOKEN };
+  const run = promisify(execFile);
+  for (const [args, overrides, message] of [
+    [['prepare', file], {}, /disposable/],
+    [['prepare', file, '--disposable'], { BLOB_STORE_ADMIN_TOKEN: '' }, /BLOB_STORE_ADMIN_TOKEN/],
+    [['prepare', file, '--disposable'], {}, /Not the disposable rehearsal profile/],
+    [['prepare', file, '--disposable'], { BLOB_STORE_URL: base + '/path' }, /bare origin/],
+  ]) await assert.rejects(run(process.execPath, ['scripts/rehearse.mjs', ...args], { env: { ...env, ...overrides } }), error => {
+    assert.match(error.stderr, message); return true;
+  });
+  assert.equal((await request(mf, '/__test/stats')).status, 404);
+  assert.match(await (await request(mf, '/')).text(), /reserved_blobs_total 0\n/);
+});
+
+test('real deployment rehearsal verifies production storage across a full restart', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'store-rehearsal-'));
+  const profile = { PROOF_OF_WORK_BITS: '4', PROOF_OF_WORK_PER_BYTE: '1', CHALLENGE_TTL_SECONDS: '3600' };
+  let mf = start(profile, join(directory, 'storage'), true);
+  t.after(async () => { await mf.dispose(); await rm(directory, { recursive: true, force: true }); });
+  const base = await mf.ready;
+  const stateFile = join(directory, 'state.rehearsal.json');
+  const options = { env: { ...process.env, BLOB_STORE_URL: base.origin, BLOB_STORE_ADMIN_TOKEN: undefined, ADMIN_TOKEN: TOKEN }, timeout: 120000 };
+  const run = promisify(execFile);
+  const prepared = await run(process.execPath, ['scripts/rehearse.mjs', 'prepare', stateFile, '--disposable'], options);
+  assert.match(prepared.stdout, /uploads left paused/);
+  assert.ok(!readFileSync(stateFile, 'utf8').includes(TOKEN));
+  const state = JSON.parse(readFileSync(stateFile, 'utf8'));
+  const keep = `# keep ${state.seed}\n`;
+  assert.equal((await request(mf, `/b/${hash(keep)}`)).status, 200);
+  await mf.dispose();
+  mf = start(profile, join(directory, 'storage'), true, Number(base.port));
+  await mf.ready;
+  const verified = await run(process.execPath, ['scripts/rehearse.mjs', 'verify', stateFile, '--disposable'], options);
+  assert.match(verified.stdout, /Verified after restart/);
+  assert.match(await (await request(mf, '/')).text(), /uploads_paused true\n/);
 });

@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Dedicated disposable resources, never the production bucket/namespace.
+  "name": "sprig-store-rehearsal",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "limits": { "cpu_ms": 100 },
+  "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "sprig-store-rehearsal" }],
+  "durable_objects": { "bindings": [{ "name": "STORE", "class_name": "StoreCoordinator" }] },
+  "exports": { "StoreCoordinator": { "type": "durable-object", "storage": "sqlite" } },
+  // Allow the fixed rehearsal to finish without throttling its own two phases.
+  "ratelimits": [{ "name": "UPLOAD_RATE_LIMITER", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } }],
+  "vars": {
+    "MAX_BLOB_BYTES": "128",
+    "MINIMUM_DEBIT_BYTES": "64",
+    "LONG_CAPACITY_BYTES": "256",
+    "BURST_CAPACITY_BYTES": "256",
+    "LONG_REFILL_BYTES_PER_DAY": "1",
+    "BURST_REFILL_BYTES_PER_HOUR": "1",
+    "VALIDATION_POLICY": "utf8-v1",
+    "PROOF_OF_WORK_BITS": "4",
+    "PROOF_OF_WORK_PER_BYTE": "1",
+    "CHALLENGE_TTL_SECONDS": "3600"
+  },
+  "observability": { "enabled": false }
+}
