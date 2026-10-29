@@ -1,5 +1,8 @@
 # Losing and finding the fern
 
+For the proposed short-barrier online successor, see [CHECKPOINTS.md](CHECKPOINTS.md).
+That document and its offline model do not change the v1 protocol below.
+
 This first recovery slice makes a coordinated source-store snapshot and restores
 it into **fresh, isolated R2 and SQLite storage**. It preserves exact source bytes,
 original submission times (including unknown legacy times), pending reservations,

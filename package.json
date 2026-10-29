@@ -19,6 +19,8 @@
     "demo:names": "node scripts/name-garden.mjs",
     "predemo:replay": "node scripts/check-node.mjs",
     "demo:replay": "node scripts/name-replay.mjs",
+    "predemo:checkpoint": "node scripts/check-node.mjs",
+    "demo:checkpoint": "node scripts/checkpoint-garden.mjs",
     "test:channels": "node --test --test-concurrency=1 channels/test/*.test.mjs",
     "test:pricing": "cd store && python3 -m unittest discover -s test -p 'test_*.py'"
   },
