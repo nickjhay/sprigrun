@@ -16,6 +16,13 @@ recoverable suppression history before public cutover, a measured backup pause
 budget, eviction/re-upload semantics, and optional ticket-free channels when work
 is off. These are proposals; the v1 archive and channel wire protocol still apply.
 
+The next recovery experiment is [snapshot generations](store/CHECKPOINTS.md): a
+short durable barrier plus bounded receipt preimages, so copying can continue
+while writes resume. `npm run demo:checkpoint` exercises the metadata model
+offline. Production still uses its full maintenance freeze. Pending-body semantics
+and recoverable suppression history remain explicit decisions before adopting
+an online archive protocol.
+
 ## Keep the foundations small
 
 | Primitive | Contract |

@@ -281,6 +281,14 @@ Incremental copies or online snapshots need a change-history design and should
 follow an actual recovery/pause requirement. Do not add concurrency until it has
 explicit object, byte, request and interruption bounds.
 
+Nick's subsequent epoch-barrier proposal is explored in
+[CHECKPOINTS.md](store/CHECKPOINTS.md) and `npm run demo:checkpoint`. A sealed
+generation fixes membership; bounded receipt preimages preserve older metadata
+while writes continue. The offline model aborts a cut on suppression or history
+budget exhaustion. Production v1 still freezes mutations for the full export;
+pending-body semantics, durable finalization and later suppression recovery need
+an explicit online protocol before that freeze can safely shrink.
+
 ### 4. Keep eviction different from suppression
 
 Today there is no automatic eviction. A `stored` receipt with no R2 object is an
