@@ -115,8 +115,9 @@ publish/read check; the destructive rehearsal is a separate command.
   Inspect both HTTP errors and runtime failures; caught HTTP 503 responses need
   not appear as runtime exceptions. Diagnostics must omit source and credentials.
 
-The experimental store offers exact public source with no automatic expiry, but
-independent backup/restore and durable submission chronology are not implemented.
+The experimental store offers exact public source with no automatic expiry and
+preserves each new reservation's `submitted_at_ms` in SQLite and R2 metadata.
+Independent backup/restore and hosted naming order/acceptance are not implemented.
 Keep important originals. Before making this the only copy of important data,
 implement and rehearse coordinated export/restore with explicit recovery-point
 and recovery-time objectives (RPO/RTO). Hosted names need durable admission

@@ -62,7 +62,16 @@ operation/inventory totals via `Usage` for a closer billing estimate.
 
 ## Outstanding-ticket cost model (v0.5)
 
-A normal new blob uses **two Worker requests** (challenge + PUT), **three DO
+The calculator currently models clients going directly to the challenge workflow.
+With work off, `POST /b` instead takes one Worker request, two DO RPCs, one R2 PUT
+and no ticket rows for a new object; the calculator's upload allowance is therefore
+conservative for that path. A duplicate POST takes one R2 GET and no R2 PUT.
+The automatic client first tries POST; when work is enabled, add one extra Worker
+and DO request per such attempt using the extra-request fields. That rejected POST
+also consumes attempt credit, so the automatic flow's maximum accepted upload rate
+can be lower than the challenge-first scenario. No new billing cap is implied.
+
+A challenge-first new blob uses **two Worker requests** (challenge + PUT), **three DO
 RPCs** (issue + redeem + publish), one conservative R2 read and one R2 write.
 Issuance checks a receipt in SQLite, not R2. Rejected proof/replay requests use one
 Worker request and, after cheap edge/header checks, one DO request; no body hash

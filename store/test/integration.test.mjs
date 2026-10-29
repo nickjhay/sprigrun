@@ -67,6 +67,9 @@ const upload = async (mf, bytes, headers = {}) => {
   return redeem(mf,await issued.json(),bytes,undefined,headers);
 };
 const stats = async mf => (await request(mf, '/__test/stats')).json();
+const receipt = async (mf, bytes) => (await request(mf, `/__test/receipt/${hash(bytes)}`)).json();
+const post = (mf, bytes, headers = {}) => request(mf, '/b', { method: 'POST', body: bytes,
+  headers: { 'Content-Type': 'text/plain; charset=utf-8', ...headers } });
 const admin = (mf, path, token = TOKEN) => request(mf, `/admin/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
 
 test('production entrypoint round-trips exact bytes, hash, HEAD and conditional GET', async t => {
@@ -75,7 +78,9 @@ test('production entrypoint round-trips exact bytes, hash, HEAD and conditional 
   const digest = hash(bytes);
   const created = await upload(mf, bytes);
   assert.equal(created.status, 201, await created.clone().text());
-  assert.deepEqual(await created.json(), { address: digest, digest: digestOf(bytes), bytes: bytes.length, url: `/b/${digest}` });
+  const result = await created.json();
+  assert.ok(Number.isSafeInteger(result.submitted_at_ms) && result.submitted_at_ms > 0);
+  assert.deepEqual(result, { address: digest, digest: digestOf(bytes), bytes: bytes.length, url: `/b/${digest}`, submitted_at_ms: result.submitted_at_ms });
   assert.equal(created.headers.get('Location'), `/b/${digest}`);
   assert.equal(created.headers.get('Cache-Control'), 'no-store');
   const read = await request(mf, `/b/${digest}`);
@@ -107,6 +112,132 @@ test('simultaneous duplicate uploads create one receipt and one quota debit', as
   assert.equal(state.reserved_blobs_total, 1);
   assert.equal(state.reserved_debit_bytes_total, 64);
   assert.equal(state.confirmed_unblocked_bytes, 4);
+});
+
+test('plain POST computes identity, returns original timestamp and is idempotent without tickets', async t => {
+  const mf=use(t), bytes=Buffer.from('\ufeffprint("café")\r\n\0'), before=Date.now();
+  const created=await post(mf,bytes);
+  assert.equal(created.status,201);
+  const first=await created.json();
+  assert.deepEqual(first,{address:hash(bytes),digest:digestOf(bytes),bytes:bytes.length,url:`/b/${hash(bytes)}`,submitted_at_ms:first.submitted_at_ms});
+  assert.ok(first.submitted_at_ms>=before && first.submitted_at_ms<=Date.now());
+  assert.equal(created.headers.get('Location'),first.url);
+  assert.equal(created.headers.get('Access-Control-Allow-Origin'),'*');
+  const bucket=await mf.getR2Bucket('BLOBS'), object=await bucket.get(`b/${hash(bytes)}`);
+  assert.deepEqual(Buffer.from(await object.arrayBuffer()),bytes);
+  assert.equal(object.customMetadata.submitted_at_ms,String(first.submitted_at_ms));
+  const duplicates=await Promise.all(Array.from({length:6},()=>post(mf,bytes)));
+  for(const duplicate of duplicates){assert.equal(duplicate.status,200);assert.deepEqual(await duplicate.json(),first);}
+  assert.equal((await stats(mf)).reserved_debit_bytes_total,64);
+  assert.equal((await stats(mf)).outstanding_challenges,0);
+  assert.deepEqual(await (await request(mf,'/__test/storage-calls')).json(),{gets:6,puts:1});
+  assert.equal((await post(mf,'')).status,201);
+});
+
+test('concurrent direct POSTs respect growth and attempt limits', async t => {
+  const mf=use(t);
+  const results=await Promise.all(Array.from({length:10},(_,i)=>post(mf,`source ${i}`)));
+  assert.equal(results.filter(r=>r.status===201).length,4);
+  assert.equal(results.filter(r=>r.status===429).length,6);
+  assert.equal((await stats(mf)).reserved_debit_bytes_total,256);
+  const limited=use(t,{ATTEMPT_CAPACITY:'2',ATTEMPTS_PER_MINUTE:'1'});
+  const invalid=await Promise.all(Array.from({length:5},()=>post(limited,new Uint8Array([255]))));
+  assert.equal(invalid.filter(r=>r.status===422).length,2);
+  assert.equal(invalid.filter(r=>r.status===429).length,3);
+  assert.equal((await stats(limited)).reserved_blobs_total,0);
+});
+
+test('POST refuses work, pause and exhausted admission before reading the body', async t => {
+  const mf=use(t);
+  for(const policy of ['pow/1/0','pow/0/1','pause']){
+    await admin(mf,policy);
+    const response=await request(mf,'/__test/probe',{headers:{'Test-Path':'/b','Test-Method':'POST'}});
+    assert.equal(response.status,policy==='pause'?503:428);
+    assert.equal(response.headers.get('Test-Body-Pulls'),'0');
+    if(policy!=='pause')assert.match((await response.json()).message,/POST \/challenge\/b\//);
+  }
+  await admin(mf,'resume'); await admin(mf,'pow/0/0');
+  assert.equal((await post(mf,'allowed')).status,201);
+  const limited=use(t,{ATTEMPT_CAPACITY:'1',ATTEMPTS_PER_MINUTE:'1'});
+  await post(limited,'one');
+  const response=await request(limited,'/__test/probe',{headers:{'Test-Path':'/b','Test-Method':'POST'}});
+  assert.equal(response.status,429); assert.equal(response.headers.get('Test-Body-Pulls'),'0');
+});
+
+test('POST rechecks a work requirement introduced during body reading', async t => {
+  const mf=use(t);
+  const response=await request(mf,'/__test/probe',{headers:{'Test-Path':'/b','Test-Method':'POST','Test-Pow-On-Read':'1','Test-Body':'race'}});
+  assert.equal(response.status,428); assert.equal(response.headers.get('Test-Body-Pulls'),'1');
+  assert.equal((await stats(mf)).reserved_blobs_total,0);
+  assert.equal((await request(mf,`/b/${hash('race')}`)).status,404);
+});
+
+test('direct POST bounds actual streams, refuses compressed bodies and never bypasses blocks', async t => {
+  const mf=use(t,{UPLOAD_TIMEOUT_MS:'100'});
+  for(const stall of [true,false]){
+    const response=await request(mf,'/__test/probe',{headers:{'Test-Path':'/b','Test-Method':'POST',...(stall?{'Test-Stall':'1'}:{})}});
+    assert.equal(response.status,stall?408:413);
+  }
+  assert.equal((await post(mf,'encoded',{'Content-Encoding':'gzip'})).status,415);
+  assert.equal((await post(mf,'x',{Authorization:'Bearer unexpected'})).status,400);
+  const created=await (await post(mf,'blocked')).json();
+  const race=await Promise.all([post(mf,'blocked'),admin(mf,`block/${hash('blocked')}`),post(mf,'blocked')]);
+  assert.ok(race.every(r=>[200,410].includes(r.status)));
+  assert.equal((await post(mf,'blocked')).status,410);
+  assert.equal((await request(mf,`/b/${hash('blocked')}`)).status,410);
+  const tombstone=await (await mf.getR2Bucket('BLOBS')).head(`b/${hash('blocked')}`);
+  assert.equal(tombstone.customMetadata.submitted_at_ms,String(created.submitted_at_ms));
+  assert.equal((await stats(mf)).reserved_blobs_total,1);
+});
+
+for(const mode of ['before-write','after-write']){
+  test(`submission timestamp survives ${mode}, restart and idempotent repair`,async t=>{
+    const directory=await mkdtemp(join(tmpdir(),'submitted-at-'));
+    let mf=start({},directory);
+    t.after(async()=>{await mf.dispose();await rm(directory,{recursive:true,force:true});});
+    await request(mf,`/__test/fault/${mode}`);
+    assert.equal((await post(mf,'retry')).status,503);
+    const original=await receipt(mf,'retry');
+    assert.ok(Number.isSafeInteger(original.submitted_at_ms));
+    await mf.dispose(); mf=start({},directory);
+    const repaired=await post(mf,'retry'); assert.equal(repaired.status,201);
+    assert.equal((await repaired.json()).submitted_at_ms,original.submitted_at_ms);
+    const duplicate=await post(mf,'retry'); assert.equal(duplicate.status,200);
+    assert.equal((await duplicate.json()).submitted_at_ms,original.submitted_at_ms);
+    const object=await (await mf.getR2Bucket('BLOBS')).head(`b/${hash('retry')}`);
+    assert.equal(object.customMetadata.submitted_at_ms,String(original.submitted_at_ms));
+    assert.equal((await stats(mf)).reserved_debit_bytes_total,64);
+  });
+}
+
+test('v0.5 timestamp migration retains quota and blocks without inventing history',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'timestamp-migration-'));
+  let mf=start({},directory);
+  t.after(async()=>{await mf.dispose();await rm(directory,{recursive:true,force:true});});
+  const old='café';
+  await post(mf,old); await admin(mf,`block/${hash('blocked')}`);
+  // Simulate the pre-field schema and original object metadata, then upgrade.
+  await (await mf.getR2Bucket('BLOBS')).put(`b/${hash(old)}`,old,{customMetadata:{kind:'blob',sha256:digestOf(old),validation_policy:'utf8-v1'}});
+  await request(mf,'/__test/forget-times');
+  await mf.dispose(); mf=start({VALIDATION_POLICY:'ascii-v1'},directory);
+  // A stricter policy for new uploads must not break an existing object's identity.
+  const duplicate=await post(mf,old); assert.equal(duplicate.status,200);
+  assert.equal((await duplicate.json()).submitted_at_ms,null);
+  assert.equal((await post(mf,'blocked')).status,410);
+  assert.equal((await stats(mf)).reserved_debit_bytes_total,64);
+  assert.ok(Number.isSafeInteger((await (await post(mf,'new')).json()).submitted_at_ms));
+});
+
+test('a duplicate or pending repair refuses corrupt submission metadata',async t=>{
+  const mf=use(t), bucket=await mf.getR2Bucket('BLOBS');
+  for(const pending of [false,true]){
+    const source=pending?'pending':'stored';
+    if(pending)await request(mf,'/__test/fault/after-write');
+    assert.equal((await post(mf,source)).status,pending?503:201);
+    await bucket.put(`b/${hash(source)}`,source,{customMetadata:{kind:'blob',sha256:digestOf(source),validation_policy:'utf8-v1',submitted_at_ms:'1'}});
+    assert.equal((await post(mf,source)).status,503);
+    assert.equal((await bucket.head(`b/${hash(source)}`)).customMetadata.submitted_at_ms,'1');
+  }
 });
 
 test('new uploads need one R2 write; ambiguous retries verify the existing object', async t => {
@@ -184,7 +315,8 @@ test('HTTP limits, canonical routes and CORS', async t => {
   const mf = use(t);
   assert.equal((await upload(mf, 'x'.repeat(129))).status, 413);
   assert.equal((await upload(mf, 'x', { 'Content-Encoding': 'gzip' })).status, 415);
-  assert.equal((await request(mf, '/b', { method: 'POST' })).status, 404);
+  assert.equal((await request(mf, '/b', { method: 'POST' })).status, 201);
+  assert.equal((await request(mf, '/b')).status, 405);
   assert.equal((await request(mf, `/b/${'A'.repeat(64)}`)).status, 404);
   assert.equal((await request(mf, '/?x=1')).status, 400);
   assert.equal((await request(mf, `/b/${hash('x')}`, { method: 'OPTIONS', headers: { Origin: 'https://app.example.test' } })).status, 204);
@@ -457,6 +589,7 @@ test('concurrent issuance cannot overrun its persistent global bucket', async t 
 test('fixed and per-byte work are pinned in outstanding tickets across live admin changes', async t => {
   const mf=use(t,{PROOF_OF_WORK_BITS:'4',PROOF_OF_WORK_PER_BYTE:'2'});
   const c=await (await issue(mf,hash('abc'))).json();
+  assert.equal(c.message_prefix,[c.protocol,c.id,c.address,String(c.expires_at_ms),c.target,''].join('\n'));
   assert.equal(BigInt('0x'+c.target)+1n,(1n<<256n)/22n);
   assert.equal((await admin(mf,'pow/12/8')).status,200);
   const c2=await (await issue(mf,hash('abc'))).json();
@@ -495,7 +628,9 @@ test('permanent receipts refuse recreating an evicted object; no public write by
   const bucket=await mf.getR2Bucket('BLOBS'); await bucket.delete(`b/${hash('written')}`);
   assert.equal((await issue(mf,hash('written'))).status,409);
   assert.equal((await request(mf,`/b/${hash('new')}`,{method:'PUT',body:'new'})).status,400);
-  assert.equal((await request(mf,'/b',{method:'POST',body:'new'})).status,404);
+  assert.equal((await post(mf,'written')).status,503);
+  await admin(mf,'pow/1/0');
+  assert.equal((await post(mf,'new')).status,428);
   for (const s of ['_01','_+1','_1.0','_1048577']) assert.equal((await request(mf,`/challenge/b/${digestOf('x')}${s}`,{method:'POST'})).status,404);
 });
 
@@ -509,8 +644,10 @@ test('real upload, smoke and admin CLIs work against the production entrypoint',
   assert.match((await run(process.execPath,['scripts/admin.mjs','pow','5','2'],options)).stdout,/"proof_of_work_per_byte":2/);
   for (let i=0;i<2;i++) assert.equal((await run(process.execPath,['scripts/upload.mjs',file],options)).stdout.trim(),hash(bytes));
   assert.deepEqual(Buffer.from(await (await fetch(`${base}/b/${hash(bytes)}`)).arrayBuffer()),bytes);
-  assert.match((await run(process.execPath,['scripts/smoke.mjs'],options)).stdout,/Verified challenge/);
+  assert.match((await run(process.execPath,['scripts/smoke.mjs'],options)).stdout,/Verified source/);
   assert.match((await run(process.execPath,['scripts/admin.mjs','pow','default'],options)).stdout,/"proof_of_work_bits":0/);
+  const curl=await run('curl',['--silent','--show-error','--fail-with-body','--max-time','15','-H','Content-Type: text/plain; charset=utf-8','--data-binary',`@${file}`,`${base}/b`]);
+  assert.equal(JSON.parse(curl.stdout).address,hash(bytes));
   assert.match((await run(process.execPath,['scripts/admin.mjs','pause'],{
     env:{...options.env,BLOB_STORE_ADMIN_TOKEN:undefined,ADMIN_TOKEN:TOKEN},
   })).stdout,/"uploads_paused":true/);

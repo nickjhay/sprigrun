@@ -40,7 +40,7 @@ One command starts:
 - The browser workbench at localhost:5173.
 - The actual source-store Worker in Miniflare/workerd at 127.0.0.1:8787, with local R2 and SQLite Durable Object state.
 - The actual channel Worker at 127.0.0.1:8788, with local SQLite and hibernation-capable WebSockets. Open **http://localhost:5173/channels** and create a channel.
-- Four demonstration blobs, published through the same challenge/proof/upload API used in production: the postcard and fern, each with its own library.
+- Four demonstration blobs, published through the same source upload API used in production (one POST with work off; challenges when enabled): the postcard and fern, each with its own library.
 
 Choose **A grafted postcard** from the example menu and Run it. It fetches a small library by hash, checks the exact bytes, adds its words, and asks who is visiting. The launcher also prints a `/r/<hash_length>` link to that stored program. Shared links load read-only and wait for an explicit Run; “Edit a copy” creates a local draft.
 

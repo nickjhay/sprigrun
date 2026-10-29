@@ -28,7 +28,9 @@ R2 and the naming coordinator do not share a transaction. Retry must reconcile
 both layers, rather than treating an existing blob as proof that naming succeeded.
 The current public store's `already_written` response alone does not establish
 availability: an externally removed object still has a permanent receipt.
-The future internal ensure operation must account for that distinction.
+The future internal ensure operation must account for that distinction. The new
+direct `POST /b` path does verify stored bytes before duplicate success, so its
+idempotent success has stronger availability semantics than the challenge's refusal.
 
 ## One selected head, plus admission facts
 
@@ -62,9 +64,15 @@ unbounded lifetime, not a promise of unlimited provider capacity or availability
 Pressure-driven eviction is a later, explicit operation. Channels keep their own
 bounded rolling retention and incarnation lifetime.
 
-Record an application class and first storage time with objects. R2 already
-returns its upload timestamp and custom metadata with a GET; a separate HEAD is
-unnecessary. Application classes such as ordinary source and naming evidence are
+The store now records its own `submitted_at_ms` in the first quota reservation and
+R2 metadata, preserving it through retries, duplicates and tombstoning. R2 returns
+custom metadata with a GET; a separate HEAD is unnecessary. The generic store
+allocates no submission sequence. Services own any sequence/acceptance facts they
+need, independently of when the blob was stored. A naming metadata copy must be
+repairable from its atomic acceptance record, and coordinated with blocking and
+other metadata writers. Independent metadata merges are not a cross-service transaction.
+
+Application classes such as ordinary source and naming evidence are
 independent of R2's billing storage tiers. A preexisting ordinary blob used as
 naming evidence needs its retention protection strengthened without changing its
 bytes or pretending its naming acceptance occurred at the original upload time.
@@ -91,6 +99,8 @@ recent recoverable ancestry while older evidence lives in durable storage.
 | New successful blob publication | One conditional R2 PUT, no preliminary GET. |
 | Retry of an ambiguous committed write | Conditional PUT fails its absence condition, then one verified GET. |
 | Already-confirmed upload refused at challenge | SQLite receipt lookup, no R2 call. |
+| New ticket-free `POST /b` | One Worker request, two DO RPCs (admit/publish), one R2 PUT; no ticket or R2 GET. |
+| Duplicate ticket-free `POST /b` | One R2 GET to verify availability/integrity; no R2 PUT or new storage debit. |
 | Channel history or WebSocket batch | SQLite operations in the hub, zero R2 calls. |
 
 Keep channels in their own SQLite Durable Object. Adding an R2 pointer followed

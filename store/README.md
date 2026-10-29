@@ -6,10 +6,14 @@ an underscore, and the exact byte length in canonical decimal. No parsing,
 compilation or execution of Sprig occurs on the server. UTF-8 validation is the
 default; ASCII is optional. Assets and compiled simulator Wasm remain separate.
 
-Uploads use expiring, single-use proof-of-work challenges. The server keeps a
-bounded table of outstanding tickets. A valid proof atomically consumes its
-ticket **before the Worker reads the upload body**. A failed upload needs a fresh
-challenge; source bytes never need a nonce comment or other modification.
+With proof of work off (the default), publish exact bytes with one `POST /b`.
+The server computes their hash and length. No ticket, local hashing or SDK is
+required. Upload attempts and storage growth remain metered.
+
+When work is enabled, uploads use expiring, single-use challenges. The server
+keeps a bounded table of outstanding tickets. A valid proof atomically consumes
+its ticket **before the Worker reads the upload body**. A failed proof-authorized
+upload needs a fresh challenge; source bytes never need a nonce comment or edit.
 
 See [SECURITY.md](SECURITY.md) and the editable [pricing.py](pricing.py) model,
 with assumptions in [BUDGET.md](BUDGET.md).
@@ -17,12 +21,15 @@ with assumptions in [BUDGET.md](BUDGET.md).
 [Threat model and core invariants](../THREATS.md) separates byte integrity,
 history preservation, recovery, cost and availability. [OPERATIONS.md](OPERATIONS.md)
 adds a disposable two-phase deployment rehearsal and the first-deployment runbook.
-Independent backup/restore and durable submission order/time are not implemented.
+New reservations preserve `submitted_at_ms` in SQLite and R2 metadata. Independent
+backup/restore and hosted naming acceptance/order are not implemented.
 
 ## Compatibility
 
-**This is a breaking protocol/storage-format release.** The old `POST /b` and
-hash-only URLs are not supported. Object and receipt keys now include length.
+**v0.5 changes the storage/address format.** Hash-only URLs are not supported.
+`POST /b` now returns a `hash_length` address; it does not restore the v0.4 protocol.
+Object and receipt keys include length. The timestamp addition upgrades existing
+v0.5 receipts in place, leaving their missing historical timestamp `null`.
 This project has not provisioned or deployed any Cloudflare resources for you.
 For a first deployment, use the defaults below. If you deployed an older edition,
 keep it running separately while planning a deliberate data/block/quota migration.
@@ -83,7 +90,27 @@ separate Wrangler dry runs before deployment. The workflow never deploys.
 
 ## Upload and read
 
-The easiest uploader preserves exact file bytes, including BOM/CRLF:
+With work off, the complete curl workflow is:
+
+```sh
+curl --fail-with-body --silent --show-error \
+  --data-binary @world.sprig https://store.sprig.run/b
+```
+
+Use your actual deployed origin (or `http://localhost:8787` locally); the example
+hostname does not imply a live deployment. `--data-binary` preserves exact bytes,
+including BOM/CRLF. Content-Type is optional; the service always validates source
+bytes and serves them as plain text. The response contains `address`, `digest`,
+`bytes`, `url`, and `submitted_at_ms`; `Location` points to the blob. A new object
+returns `201`; repeating the same bytes returns `200` with the original time and
+without another growth debit. Duplicate success verifies that the object is
+actually present and intact. It never recreates a missing or blocked object.
+
+When work is enabled, this endpoint returns `428 proof_required` with instructions
+before reading the body. A curl client needs a local SHA-256 tool/solver for that
+mode. The service does not ask clients to execute downloaded code. The uploader
+below tries the direct POST, then uses the challenge workflow only on that exact
+work-required response:
 
 ```sh
 BLOB_STORE_URL=https://blobs.example.com node scripts/upload.mjs world.sprig
@@ -109,7 +136,8 @@ Runtime execution/memory limits are still required when using the source.
 
 | Request | Result |
 | --- | --- |
-| `POST /challenge/b/<hash_length>` with no body | `201` and challenge JSON |
+| `POST /b` with raw source body, work off | `201` new / `200` existing, identity and original time |
+| `POST /challenge/b/<hash_length>` with no body | `201` and challenge JSON including exact `message_prefix` |
 | `PUT /b/<hash_length>` with proof headers and raw source body | `201` and identity JSON |
 | `GET /b/<hash_length>` | Verified source bytes or error |
 | `HEAD /b/<hash_length>` | Same verified headers, no response body |
@@ -134,7 +162,7 @@ and the upload deadline. It requires exactly that many bytes, checks SHA-256 and
 UTF-8/ASCII, then reserves growth credit and writes R2. The response is:
 
 ```json
-{"address":"<hash>_123","digest":"<hash>","bytes":123,"url":"/b/<hash>_123"}
+{"address":"<hash>_123","digest":"<hash>","bytes":123,"url":"/b/<hash>_123","submitted_at_ms":1800000000000}
 ```
 
 `Location` contains that relative path. An empty body is allowed and has length
@@ -142,6 +170,14 @@ UTF-8/ASCII, then reserves growth credit and writes R2. The response is:
 is at most 71 characters under the default 262144-byte upload cap, or 72 under
 the runtime 1 MiB ceiling. Hashes cover exact bytes with no normalization. Source
 may contain BOM, control characters, CRLF and NUL. Compressed uploads are rejected.
+
+`submitted_at_ms` is server Unix epoch milliseconds at the first successful quota
+reservation for validated bytes. It is committed atomically with the reservation
+and copied to R2 custom metadata as a decimal string before publication. Failed
+R2 writes, retries, duplicate POSTs, restarts and tombstoning retain it. It is not
+upload completion time, a total order, or naming acceptance time; each service
+owns any ordering it needs. Older v0.5 receipts have `null` (unknown), not a guessed
+timestamp. No R2 metadata rewrite or backfill of old objects is performed.
 
 There is no public enumeration, overwrite, delete, binary-upload grant or user
 identity. Hashes are references, not secrets. `Authorization` on a public write
@@ -158,11 +194,14 @@ The server responds with:
   "id": "<random 256-bit ID as 64 hex digits>",
   "address": "<hash_length>",
   "expires_at_ms": 1800000000000,
-  "target": "<unsigned 256-bit target as 64 hex digits>"
+  "target": "<unsigned 256-bit target as 64 hex digits>",
+  "message_prefix": "blob-store-upload-v1\n<id>\n<hash_length>\n<expires_at_ms>\n<target>\n"
 }
 ```
 
-These are stored server-side. Neither an HMAC nor an issuance counter is needed:
+The authoritative challenge fields are stored server-side; `message_prefix` is
+derived for the response so a minimal client need not rebuild its encoding.
+Neither an HMAC nor an issuance counter is needed:
 redemption must find that exact outstanding record, and uses its stored values.
 All tickets, even trivial-work tickets, are unpredictable, bound to an address,
 expire, and authorize only one body-processing attempt.
@@ -202,7 +241,7 @@ Set environment defaults in `wrangler.jsonc`, or change live with admin controls
 ```sh
 npm run admin -- pow 16 8     # fixed work plus 8 expected trials per source byte
 npm run admin -- pow 12       # change fixed work; retain effective per-byte value
-npm run admin -- pow 0 0      # trivial work; tickets remain single-use
+npm run admin -- pow 0 0      # enable ticket-free POST /b; existing tickets still work
 npm run admin -- pow default  # clear both overrides, follow config defaults
 ```
 
@@ -210,6 +249,8 @@ Live overrides persist across restarts and deployments. Each issued ticket keeps
 its quoted target until expiry. Raising difficulty does not invalidate work
 already underway; use `pause` for an immediate admission stop. To eliminate old
 low-work tickets, remain paused through their expiry before resuming.
+Direct POST checks that both work parameters are zero before reading the body
+and again under the publication lock, so a policy change cannot slip through.
 
 For other clients, the offline solver takes a saved challenge JSON file:
 
@@ -249,9 +290,10 @@ issuance stops until those records are consumed or expire. SQLite allocation and
 internal metadata are platform-managed; measure database size rather than treating
 this logical-row bound as an exact bound on allocated disk bytes.
 
-A stored address cannot be uploaded again, even if its R2 object was externally
-evicted. Permanent receipts enforce that history. Pending reservations from an
-ambiguous write may finish with a fresh ticket without a second growth debit.
+A stored address cannot be recreated, even if its R2 object was externally
+evicted. Permanent receipts enforce that history. A direct POST duplicate verifies
+existing bytes and returns success without writing them again. Pending reservations
+from an ambiguous write may finish with fresh admission without a second growth debit.
 They are never automatically refunded: SQLite and R2 do not share a transaction.
 The final publication checks the receipt again after validation, so an address
 written or blocked since challenge issuance cannot be overwritten.

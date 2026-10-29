@@ -30,7 +30,7 @@ export type Failure = {
   proof_of_work?: { protocol: string; target: string; message_prefix: string };
 };
 export type Result<T> = { ok: true; value: T } | Failure;
-export type Published = { digest: string; bytes: number; created: boolean };
+export type Published = { digest: string; bytes: number; created: boolean; submitted_at_ms: number | null };
 
 export class HttpError extends Error {
   status: number;

@@ -1,4 +1,4 @@
-# Security review — v0.5.0, 27 October 2026
+# Security review — v0.5.0, updated 29 October 2026
 
 This release uses `hash_length` addresses and bounded outstanding challenges.
 The review covers code, emulated Cloudflare integration and failure injection;
@@ -8,10 +8,18 @@ The October 29 [threat model](../THREATS.md) maps the critical invariants to the
 implementation and distinguishes byte integrity, recoverability and history.
 [OPERATIONS.md](OPERATIONS.md) supplies a disposable deployment rehearsal; local
 restart checks do not establish cloud recovery or bounded bills. The store still
-has no independent backup/restore or authoritative submission order/time journal.
+has no independent backup/restore or hosted naming admission journal. It now
+preserves each new blob's original reservation time in SQLite and R2 metadata.
 
 ## Admission and proof invariants
 
+- With both work parameters zero, `POST /b` needs no ticket or precomputed hash.
+  It durably debits the same global attempt bucket before reading any body. The
+  publication lock rechecks work policy and pause after reading. Raising either
+  work parameter blocks direct POST; it returns `428 proof_required` and guidance.
+  There is no permanent replay record for this path: each request spends attempt
+  credit, while duplicate source reserves no additional growth. Concurrent identical
+  POSTs converge on one receipt and original timestamp.
 - Ticket IDs are random 256-bit values. Authoritative address, expiry and target
   live in SQLite. No client-supplied target, length override or signature is trusted.
   The proof hashes a versioned, unambiguous message including ID, address, expiry,
@@ -38,8 +46,8 @@ has no independent backup/restore or authoritative submission order/time journal
 
 ## Content and quota invariants
 
-The Worker reads at most the declared address length, within the configured cap
-and deadline. The RPC publication boundary independently checks exact length,
+The Worker reads at most the declared address length (addressed PUT) or configured
+cap (direct POST), within the deadline. The RPC boundary independently checks length,
 actual SHA-256 and fatal UTF-8/ASCII. Header lengths cannot substitute for actual
 counting. Compressed uploads are rejected. A fixed allocation copies each chunk
 immediately, avoiding retained chunk lists or oversized backing buffers.
@@ -47,8 +55,19 @@ immediately, avoiding retained chunk lists or oversized backing buffers.
 Only validated bytes can create a permanent pending receipt. Both growth buckets
 are debited atomically, and that transaction is durably flushed before any R2
 write. A failed/ambiguous write retains its reservation; a fresh-ticket retry can
-complete it without a second debit. No automatic refunds can create uncharged
+complete it without a second debit. Direct POST retries get fresh attempt admission
+without a ticket while work is off. No automatic refunds can create uncharged
 stored data. Stored receipts refuse all recreation, including after eviction.
+Direct duplicate success verifies actual stored bytes and original timestamp;
+missing/corrupt storage fails closed instead of returning a receipt as availability.
+Duplicates validate the stored source policy; tightening the policy for new
+uploads does not reinterpret existing objects.
+
+The first reservation also records `submitted_at_ms` from the service clock.
+It is copied unchanged into R2 custom metadata, preserved through retries and
+tombstoning, and checked when reconciling an existing object. Old v0.5 receipts
+retain `null` for unknown time. No global sequence is allocated, and this field
+is not naming acceptance, wall-clock monotonicity or proof of when a client sent.
 
 Publication checks permanent receipt state again under the mutation lock. R2
 conditional create and serialized blocking prevent overwrites/resurrection. A
@@ -64,7 +83,8 @@ new-upload policy to ASCII does not invalidate previously stored valid UTF-8.
 The HTTP Worker is the trusted admission caller of `publish`. Durable Object RPCs
 are internal binding capabilities, not public HTTP endpoints. Do not expose the
 DO binding to untrusted Workers or add a public path that calls publication
-without redemption. Test-only fault methods are excluded from production builds.
+without redemption or metered open admission. Test-only fault methods are
+excluded from production builds.
 
 ## Other boundaries
 
@@ -109,13 +129,15 @@ remain independent; disabling the Worker route is a broader operational stop.
 
 ## Validation evidence
 
-All 62 service/client/CLI tests and both strict TypeScript targets pass. Tests cover
+The service/client/CLI suite and both strict TypeScript targets cover
 parallel redemption with different valid solutions to one ticket, wrong-body
 attempts, wrong-address/weak/replayed proofs rejected before any body reads,
 expiry/capacity/rate bounds, persistent tickets/consumption/overrides across restart,
 new work quotations, real CLIs, and legacy-schema refusal. Previous quota, format,
 stream-buffer, corruption, block-race and ambiguous-write protections remain tested.
 The Wrangler deployment dry run passes. All nine Python pricing tests pass separately.
+Direct POST adds tests for real curl use, idempotency, timestamp preservation,
+schema migration, policy races and shared admission/storage budgets.
 No Cloudflare resource was created or deployed during this work.
 
 References: [DO storage](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/),
