@@ -225,7 +225,7 @@ but carries implementation details into recovery:
 - `policyEnv()` maps an archive configuration back through environment variables
   to validate it. That is coupling between deployment setup and the archive.
 
-For a future explicit format version, prefer original receipt facts, exact bytes,
+For the replacement format, prefer original receipt facts, exact bytes,
 per-object validation contract, needed operator policy, and integrity checkpoints.
 Construct fresh paused controls separately. Keep source configuration as provenance
 if useful, without requiring every operational setting to match the target.
@@ -233,8 +233,9 @@ Historical naming policy remains different: changing it can change replay result
 The stored validation policy still determines how an older blob is read, regardless
 of the target's current admission policy.
 
-Do not silently drop metadata, change v1 meanings, or reinterpret already saved
-archives. Specify unknown-field/extension handling and migration first. Keep the
+Nothing is deployed and there are no compatibility obligations. Replace the old
+format and fixtures together; reset/reseed disposable local state. Specify the
+required facts and unknown-field handling without a migration framework. Keep the
 aggregate cross-check and ordered checksum: deliberate redundancy detects drift.
 Base64 is still useful for exact bytes and a predictable size bound, including
 NUL-heavy UTF-8. Reformatting source or inventing a general serialization language
@@ -281,13 +282,15 @@ Incremental copies or online snapshots need a change-history design and should
 follow an actual recovery/pause requirement. Do not add concurrency until it has
 explicit object, byte, request and interruption bounds.
 
-Nick's subsequent epoch-barrier proposal is explored in
-[CHECKPOINTS.md](store/CHECKPOINTS.md) and `npm run demo:checkpoint`. A sealed
-generation fixes membership; bounded receipt preimages preserve older metadata
-while writes continue. The offline model aborts a cut on suppression or history
-budget exhaustion. Production v1 still freezes mutations for the full export;
-pending-body semantics, durable finalization and later suppression recovery need
-an explicit online protocol before that freeze can safely shrink.
+Nick's subsequent clarification supersedes the preimage/abort-on-block proposal:
+[CHECKPOINTS.md](store/CHECKPOINTS.md) specifies a commit-only barrier, with private
+R2 preparation outside short metadata transactions. Preserve one-way reservation,
+publication and block facts with their epochs. Later blocks suppress live reads
+while the sealed cut pins old private payloads. This requires a metadata lookup on
+public reads. `npm run demo:checkpoint` exercises the revised offline model; the
+Worker still has its full-export freeze pending integration. There is no deployed
+legacy to preserve: replace schema/archive/fixtures together instead of maintaining
+both formats.
 
 ### 4. Keep eviction different from suppression
 

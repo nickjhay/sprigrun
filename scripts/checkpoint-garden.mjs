@@ -1,27 +1,31 @@
 import assert from 'node:assert/strict';
-import { initial, seal, write, view } from '../store/experiments/checkpoint.ts';
+import { initial, reserve, prepared, publish, block, seal, snapshot, readable, reclaim } from '../store/experiments/checkpoint.ts';
 import { addressOf } from '../src/document.ts';
 
-// Offline metadata experiment. No source bytes are uploaded or backed up here.
-async function receipt(source, status, submittedAtMs) {
-  const bytes = new TextEncoder().encode(source);
-  return { address: await addressOf(bytes), status, bytes: bytes.length, debit: 8192, submitted_at_ms: submittedAtMs };
+// Offline commit/visibility experiment. No bytes are uploaded or backed up here.
+async function source(text) {
+  const bytes = new TextEncoder().encode(text);
+  return { address: await addressOf(bytes), bytes: bytes.length };
 }
-const fern = await receipt('print "a fern uncurls"\n', 'pending', 100);
-const moss = await receipt('print "moss arrives"\n', 'stored', 210);
-let state = seal(initial([fern]), { proofOfWorkBits: 0 }, { nowMs: 200, ttlMs: 1000, maxShadowRows: 10 });
-const cut = view(state, 0, 201);
-state = write(state, { ...fern, status: 'stored' }, 202);
-state = write(state, moss, 210);
-state = JSON.parse(JSON.stringify(state)); // Restart from the simulated committed state.
-assert.deepEqual(view(state, 0, 211), cut);
-console.log('Seal generation 0; new writes use generation 1.\n');
+const fern = await source('print "a fern uncurls"\n');
+const moss = await source('print "moss arrives"\n');
+let state = reserve(initial(), fern.address, fern.bytes, 8192, 100);
+state = publish(prepared(state, fern.address), fern.address, 110);
+state = reserve(state, moss.address, moss.bytes, 8192, 120);
+state = seal(state, { proofOfWorkBits: 0 }, 200, 1000);
+const cut = snapshot(state, 0, 201);
+state = publish(prepared(state, moss.address), moss.address, 210);
+state = block(state, fern.address, 220);
+state = JSON.parse(JSON.stringify(state)); // Simulated restart from committed facts.
+assert.deepEqual(snapshot(state, 0, 221), cut);
+assert.throws(() => reclaim(state, fern.address, 221), /snapshot_pins_payload/);
+console.log('Seal epoch 0; subsequent publications and blocks commit in epoch 1.\n');
 console.table([
-  { view: 'sealed', fern: view(state, 0, 211).receipts[0].status, moss: 'absent' },
-  { view: 'live', fern: state.rows[0].receipt.status, moss: state.rows[1].receipt.status },
+  { view: 'sealed', fern: 'published', moss: 'reserved, not published' },
+  { view: 'live', fern: readable(state, fern.address) ? 'published' : 'blocked', moss: readable(state, moss.address) ? 'published' : 'absent' },
 ]);
-console.log('One small receipt preimage preserves the cut across confirmation and restart.');
-state = write(state, { ...fern, status: 'blocked' }, 212);
-assert.throws(() => view(state, 0, 213), /checkpoint_suppression/);
-console.log('A later block succeeds immediately and invalidates the unfinished snapshot.');
-console.log('This models the metadata boundary only. A sealed cut is not yet a backup.');
+console.log('Preparation crossed the barrier; publication used the new epoch.');
+console.log('Blocking changed live visibility immediately; the old snapshot still has its fern.');
+console.log('The fern payload stays private and pinned until copying finishes or expires.');
+console.log('No general undo log: retain the reservation, publication and block facts.');
+console.log('This is an offline model. A sealed cut is not yet a durable backup.');

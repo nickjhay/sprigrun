@@ -16,12 +16,14 @@ recoverable suppression history before public cutover, a measured backup pause
 budget, eviction/re-upload semantics, and optional ticket-free channels when work
 is off. These are proposals; the v1 archive and channel wire protocol still apply.
 
-The next recovery experiment is [snapshot generations](store/CHECKPOINTS.md): a
-short durable barrier plus bounded receipt preimages, so copying can continue
-while writes resume. `npm run demo:checkpoint` exercises the metadata model
-offline. Production still uses its full maintenance freeze. Pending-body semantics
-and recoverable suppression history remain explicit decisions before adopting
-an online archive protocol.
+The next recovery design is [a commit-only epoch barrier](store/CHECKPOINTS.md):
+private payload preparation stays outside short metadata commits; publication and
+blocking receive the current epoch at commit. One-way reservation/publication/block
+facts replace the earlier preimage/abort-on-block model. Live blocks hide source
+while the older cut pins its private bytes. This requires an authoritative metadata
+lookup on public reads. `npm run demo:checkpoint` exercises the revised model;
+the Worker still uses the old freeze pending integration. Nothing is deployed:
+replace the existing schema/archive rather than adding compatibility machinery.
 
 ## Keep the foundations small
 
