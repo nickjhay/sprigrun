@@ -7,9 +7,11 @@ it is not an independent audit or a claim about a deployed configuration.
 The October 29 [threat model](../THREATS.md) maps the critical invariants to their
 implementation and distinguishes byte integrity, recoverability and history.
 [OPERATIONS.md](OPERATIONS.md) supplies a disposable deployment rehearsal; local
-restart checks do not establish cloud recovery or bounded bills. The store still
-has no independent backup/restore or hosted naming admission journal. It now
-preserves each new blob's original reservation time in SQLite and R2 metadata.
+restart checks do not establish cloud recovery or bounded bills. The store
+preserves original reservation time in SQLite and R2 metadata. The coordinated
+[snapshot and restore tool](RECOVERY.md) now has a local loss/recovery drill;
+independent backup custody, newer-history reconciliation and cloud recovery
+measurement remain operational work. There is no hosted naming admission journal.
 
 ## Admission and proof invariants
 
