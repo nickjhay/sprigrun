@@ -10,6 +10,12 @@ storage with name acceptance in one publishing request. Keep one selected head
 plus per-record acceptance facts, a service policy constant for recovery, and
 no automatic expiry for ordinary blobs. Channels keep their separate retention.
 
+After the first local loss/recovery drill, the [simplicity review](SERVICES.md#review-after-the-first-recovery-drill)
+identifies the next decisions: logical archive facts versus deployment settings,
+recoverable suppression history before public cutover, a measured backup pause
+budget, eviction/re-upload semantics, and optional ticket-free channels when work
+is off. These are proposals; the v1 archive and channel wire protocol still apply.
+
 ## Keep the foundations small
 
 | Primitive | Contract |

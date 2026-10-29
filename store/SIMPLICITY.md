@@ -100,3 +100,9 @@ in `../shared/`. Keep that directory when building either service. New publicati
 try the conditional R2 PUT first; only a preexisting object needs a verifying GET.
 The pending-receipt/flush/conditional-write recovery rules are preserved. Root
 CI now includes this project's full test suite and both typecheck configurations.
+
+The [post-recovery review](../SERVICES.md#review-after-the-first-recovery-drill)
+distinguishes historical facts from cached totals and live credits, records the
+next archive/cutover/eviction decisions, and tightens duplicate publication in
+the bundled client. A PoW-path `already_written` receipt now needs a fresh verified
+GET before the helper reports success; ordinary zero-work uploads remain one POST.
