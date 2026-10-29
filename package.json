@@ -10,6 +10,8 @@
     "build": "node scripts/build.mjs",
     "predev": "node scripts/check-node.mjs",
     "dev": "node scripts/dev.mjs",
+    "predev:ui": "node scripts/check-node.mjs",
+    "dev:ui": "node scripts/dev.mjs --ui-only",
     "typecheck": "tsc --noEmit && tsc -p store/tsconfig.json --noEmit && tsc -p store/tsconfig.client.json --noEmit && tsc -p channels/tsconfig.json --noEmit && tsc -p channels/tsconfig.client.json --noEmit",
     "test": "node --test test/*.test.mjs",
     "check": "npm run typecheck && npm test && npm run test:store && npm run test:channels && npm run test:pricing && npm run build",

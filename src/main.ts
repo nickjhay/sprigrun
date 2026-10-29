@@ -271,6 +271,6 @@ if(!pendingShared&&!invalidRoute)try{
 if(runtime){element('runtime-state').textContent=build.runtimeVersion??'CONNECTED';element('runtime-description').textContent='A tiny test language with a terminal, a stack, and words you can graft by hash. Sprig support will follow.';}
 if(pendingShared||invalidRoute){source.replace(new Uint8Array(),'shared-source.sprig');editor.placeholder='Shared source appears here after verification.';}
 renderSource();
-if(build.local)element('environment').textContent='Local workbench · local store';
+if(build.local)element('environment').textContent=origin?'Local workbench · local store':'Local workbench · no store connected';
 if(pendingShared)element('draft-status').textContent='Waiting for source';
 if(pendingShared){element<HTMLInputElement>('address-input').value=pendingShared;void openShared(pendingShared).catch(error=>{if(error?.name!=='AbortError')notice(error instanceof Error?error.message:'Unable to load shared source.',true);});}

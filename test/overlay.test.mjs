@@ -16,14 +16,16 @@ const html=await readFile('index.html','utf8');
 const settings={publishWorker:'/publish.js',runtimeWorker:'/worker.js',runtimeModule:'/runtime/moss.js',runtimeVersion:'Moss / 1',storeOrigin:'http://localhost:8787',local:true,demo:{library:'',program:''}};
 const bundle=await build({entryPoints:['src/main.ts'],bundle:true,write:false,format:'iife',loader:{'.css':'empty'},define:{__BUILD__:JSON.stringify(settings)}});
 const code=bundle.outputFiles[0].text;
+const previewBundle=await build({entryPoints:['src/main.ts'],bundle:true,write:false,format:'iife',loader:{'.css':'empty'},define:{__BUILD__:JSON.stringify({...settings,storeOrigin:''})}});
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 async function settle(){for(let i=0;i<8;i++)await tick();}
 async function until(predicate){const end=performance.now()+2000;while(!predicate()&&performance.now()<end)await new Promise(resolve=>setTimeout(resolve,5));}
 const key='sprig-workbench:draft:v1';
 
-function fixture(t,path='/workspace',{saved='#!moss/1\n"hello" print\n',fetcher=()=>{throw new Error('Unexpected network access');}}={}){
+function fixture(t,path='/workspace',{saved='#!moss/1\n"hello" print\n',savedStore,script=code,fetcher=()=>{throw new Error('Unexpected network access');}}={}){
   const {window,document}=parseHTML(html),workers=[],timers=new Set();
   const values=new Map(saved===null?[]:[[key,encodeDraft(new SourceDocument(new TextEncoder().encode(saved)).snapshot())]]);
+  if(savedStore)values.set('sprig-workbench:store:v1',savedStore);
   const location=new URL(path,'http://localhost:5173');
   const editor=document.getElementById('source');
   let focused=document.body;
@@ -47,7 +49,7 @@ function fixture(t,path='/workspace',{saved='#!moss/1\n"hello" print\n',fetcher=
     ResizeObserver:class{observe(){}},requestAnimationFrame:fn=>queueMicrotask(fn),confirm:()=>true,
     navigator:{clipboard:{writeText:async text=>{context.copied=text;}}},atob,btoa,fetch:fetcher,
     setTimeout:(fn,delay)=>{const id=setTimeout(()=>{timers.delete(id);fn();},delay);timers.add(id);return id;},clearTimeout:id=>{timers.delete(id);clearTimeout(id);}};
-  runInNewContext(code,context);
+  runInNewContext(script,context);
   const el=id=>document.getElementById(id);
   const event=(id,type)=>el(id).dispatchEvent(new window.Event(type,{bubbles:true,cancelable:true}));
   const edit=text=>{editor.value=text;event('source','input');};
@@ -55,6 +57,22 @@ function fixture(t,path='/workspace',{saved='#!moss/1\n"hello" print\n',fetcher=
   t.after(close);
   return {document,window,workers,values,location,editor,el,event,edit,context};
 }
+
+test('UI preview keeps the draft and ignores a saved remote store until explicitly connected',async t=>{
+  const f=fixture(t,'/workspace',{script:previewBundle.outputFiles[0].text,savedStore:'https://saved.example'});
+  assert.equal(f.el('store-url').value,'');
+  assert.equal(f.el('connection-state').textContent,'NOT SET');
+  assert.match(f.el('environment').textContent,/no store connected/);
+  assert.equal(f.el('publish').disabled,true);
+  assert.equal(f.el('run').disabled,false);
+  assert.equal(f.editor.value,'#!moss/1\n"hello" print\n');
+  f.el('run').click();await settle();assert.equal(f.workers.length,1);
+  f.workers[0].message({type:'done',value:{summary:'done'}});await settle();
+  f.el('store-url').value='http://localhost:8787';f.el('connect-store').click();await settle();
+  assert.equal(f.el('publish').disabled,false);
+  assert.match(f.el('environment').textContent,/custom store/);
+  assert.equal(f.editor.value,'#!moss/1\n"hello" print\n');
+});
 
 test('overlay keeps the editor node, draft, selection and scroll through collapse and worker restart',async t=>{
   const f=fixture(t),{editor,el,workers}=f;
