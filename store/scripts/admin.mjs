@@ -3,7 +3,7 @@
 import { parseAddress, workTarget } from '../src/proof.ts';
 const [command, argument, perByte, extra] = process.argv.slice(2);
 const base = process.env.BLOB_STORE_URL;
-const token = process.env.BLOB_STORE_ADMIN_TOKEN;
+const token = process.env.BLOB_STORE_ADMIN_TOKEN ?? process.env.ADMIN_TOKEN;
 let valid = base && token && extra === undefined && ['pause', 'resume', 'block', 'pow'].includes(command);
 if (command === 'pause' || command === 'resume') valid &&= argument === undefined;
 if (command === 'block') valid &&= parseAddress(argument ?? '') !== null && perByte === undefined;

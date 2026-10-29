@@ -9,3 +9,6 @@ coverage/
 __pycache__/
 *.pyc
 *.secret.json
+*.rehearsal.json
+.dev.vars.*
+!.dev.vars.example

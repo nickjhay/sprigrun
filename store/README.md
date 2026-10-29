@@ -14,6 +14,11 @@ challenge; source bytes never need a nonce comment or other modification.
 See [SECURITY.md](SECURITY.md) and the editable [pricing.py](pricing.py) model,
 with assumptions in [BUDGET.md](BUDGET.md).
 
+[Threat model and core invariants](../THREATS.md) separates byte integrity,
+history preservation, recovery, cost and availability. [OPERATIONS.md](OPERATIONS.md)
+adds a disposable two-phase deployment rehearsal and the first-deployment runbook.
+Independent backup/restore and durable submission order/time are not implemented.
+
 ## Compatibility
 
 **This is a breaking protocol/storage-format release.** The old `POST /b` and
@@ -55,8 +60,10 @@ Cloud setup (Workers Paid, R2 Standard, SQLite DO):
    `bounded-blob-store-v05` and `world-source-blobs-v05`.
 3. `npx wrangler r2 bucket create world-source-blobs-v05`
 4. Keep the bucket private: no public `r2.dev` URL or R2 custom domain.
-5. `npm run deploy`
-6. `npx wrangler secret put ADMIN_TOKEN`, supplying your own token.
+5. Prepare a private secrets file containing your generated `ADMIN_TOKEN`; see
+   [OPERATIONS.md](OPERATIONS.md) for a command that does not print it.
+6. `npx wrangler deploy --secrets-file YOUR_PRIVATE_SECRETS_FILE`, installing the
+   admin credential with the first deployment.
 7. `BLOB_STORE_URL=https://YOUR-WORKER.workers.dev npm run smoke`
 
 Wrangler provisions the DO declaration in `exports`; there is no separate SQL
@@ -70,8 +77,9 @@ For an active Cloudflare zone, add a Worker custom domain and redeploy:
 ```
 
 Cloudflare manages the domain certificate. Your Netlify/GitHub frontend can stay
-where it is. Public CORS allows its fetches. The included GitHub workflow checks
-TypeScript, service/CLI tests, Wrangler's dry run and Python tests; it never deploys.
+where it is. Public CORS allows its fetches. The root GitHub workflow checks
+TypeScript, service/CLI tests, Python tests and the workbench build; run the
+separate Wrangler dry runs before deployment. The workflow never deploys.
 
 ## Upload and read
 
