@@ -5,6 +5,7 @@ export interface Env {
   STORE: DurableObjectNamespace<StoreCoordinator>;
   UPLOAD_RATE_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
   ADMIN_TOKEN?: string;
+  RESTORE_MODE?: string;
   MAX_BLOB_BYTES?: string;
   MINIMUM_DEBIT_BYTES?: string;
   LONG_REFILL_BYTES_PER_DAY?: string;

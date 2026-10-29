@@ -13,7 +13,9 @@ The next naming and commons steps are recorded in [NEXT.md](NEXT.md); [SERVICES.
 ## Run the whole system locally
 
 For service deployment, start with [the threat model and invariant map](THREATS.md)
-and [the source-store rehearsal/runbook](store/OPERATIONS.md). The store can be
+and [the source-store rehearsal/runbook](store/OPERATIONS.md).
+[“Losing and finding the fern”](store/RECOVERY.md) covers coordinated snapshots,
+restore into fresh storage, and the local loss drill. The store can be
 deployed independently; the workbench and naming experiment need not ship with it.
 
 Use Node **24** (`.nvmrc` pins the version used by CI). With [nvm](https://github.com/nvm-sh/nvm), run:

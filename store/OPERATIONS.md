@@ -2,8 +2,10 @@
 
 The source store deploys independently of the workbench, channels and naming.
 Read [the threat model](../THREATS.md) for invariants, failure states and limits.
-The cloud rehearsal, billing measurement and backup/restore drill have **not**
-been performed. Local restart evidence is not a disaster-recovery test.
+The cloud rehearsal, billing measurement and cloud recovery drill have **not**
+been performed. [RECOVERY.md](RECOVERY.md) adds coordinated snapshot export/restore
+and a local drill that deletes both original databases before recovering the fern.
+Local evidence does not establish cloud recovery behavior or measured RPO/RTO.
 
 ## Check locally
 
@@ -117,11 +119,12 @@ publish/read check; the destructive rehearsal is a separate command.
 
 The experimental store offers exact public source with no automatic expiry and
 preserves each new reservation's `submitted_at_ms` in SQLite and R2 metadata.
-Independent backup/restore and hosted naming order/acceptance are not implemented.
-Keep important originals. Before making this the only copy of important data,
-implement and rehearse coordinated export/restore with explicit recovery-point
-and recovery-time objectives (RPO/RTO). Hosted names need durable admission
-facts and protected recovery capacity first; they are not part of this release.
+Coordinated export/restore into fresh isolated storage is implemented and tested
+locally; see [the recovery runbook](RECOVERY.md). Keep important originals. Before
+making this the only copy, retain independently controlled backups, rehearse cloud
+recovery, choose recovery-point/time objectives (RPO/RTO), and preserve a way to
+reconcile newer suppression/history. Hosted names still need durable admission
+facts and protected recovery capacity; they are not part of this release.
 
 ## Incident actions
 
@@ -146,8 +149,8 @@ blocking arbitrary addresses; rotate it and inspect both SQL refusals and R2.
 ## Code rollback is not data restoration
 
 Rollback only to code compatible with the live schema/security policy. Do not
-reset namespaces or discard quotas/blocks to make older code run. A coordinated
-restore tool is **not implemented**. Its requirements are:
+reset namespaces or discard quotas/blocks to make older code run. The [restore tool](RECOVERY.md) covers a consistent snapshot into a fresh isolated
+target. A safe public cutover still requires:
 
 1. Stop traffic and preserve newer state/evidence. Identify the recovery point
    and accepted loss interval; never invent missing admission stamps.

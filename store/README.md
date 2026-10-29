@@ -21,8 +21,11 @@ with assumptions in [BUDGET.md](BUDGET.md).
 [Threat model and core invariants](../THREATS.md) separates byte integrity,
 history preservation, recovery, cost and availability. [OPERATIONS.md](OPERATIONS.md)
 adds a disposable two-phase deployment rehearsal and the first-deployment runbook.
-New reservations preserve `submitted_at_ms` in SQLite and R2 metadata. Independent
-backup/restore and hosted naming acceptance/order are not implemented.
+New reservations preserve `submitted_at_ms` in SQLite and R2 metadata.
+[RECOVERY.md](RECOVERY.md) documents coordinated export, offline verification and
+restore into fresh isolated storage, with a local loss-and-recovery drill. Hosted
+naming acceptance/order and reconciliation of history newer than a snapshot remain
+future work.
 
 ## Compatibility
 
