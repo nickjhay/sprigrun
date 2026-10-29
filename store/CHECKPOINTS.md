@@ -1,187 +1,183 @@
-# A short barrier, then a slow copy
+# Pause commits, seal an epoch, keep copying
 
-29 October 2026. Design and **offline metadata experiment**, not a deployed
-protocol. [RECOVERY.md](RECOVERY.md) remains the implemented recovery contract:
-the v1 exporter holds a durable maintenance freeze throughout export. Nothing
-here changes existing archives, endpoints, or retention.
+29 October 2026. Revised after Nick's clarification: the desired pause covers
+**commits**, including blocks, and lasts only until the epoch barrier is durable.
+Copying proceeds independently. There is no deployed state or archive format to
+preserve; replace the earlier design where doing so simplifies the service.
 
-Nick's proposed tranche is a **snapshot generation** (or epoch). A brief barrier
-seals a logical cut, then copying proceeds while later writes use a new generation.
-This needs both a stable membership boundary and preservation of old versions.
-The number alone provides only the first.
+This document and `experiments/checkpoint.ts` specify the proposed replacement.
+The Worker still uses the existing whole-export maintenance freeze described in
+[RECOVERY.md](RECOVERY.md). `npm run demo:checkpoint` runs the revised offline
+model with Node 24. It now allows blocks after the barrier without aborting the
+snapshot. It has no R2, disk durability, real transaction scheduler, or cloud
+latency measurement. Serialization tests model restart from committed state.
 
-Run `npm run demo:checkpoint` from the repository root with Node 24. The model in
-`experiments/checkpoint.ts` exercises receipt preimages, new arrivals, serialized
-restart, expiry, a history limit, and suppression. Tests enumerate all 24 orderings
-of two confirmations and two admissions, checking the same cut after each write
-and restart. It has no R2, network, disk durability, quota implementation, or
-concurrency scheduler. Whole-state cloning is a reference-model convenience;
-production SQL must touch bounded rows. Serialization checks state sufficiency,
-not whether a real transaction has reached durable storage.
+## Make the commit a short metadata transaction
 
-## The barrier
+Today an R2 PUT also makes bytes publicly readable, and the coordinator holds its
+writer queue over that network operation. Just incrementing an epoch inside this
+architecture either waits for R2 or permits visibility outside the metadata cut.
+For a barrier independent of upload latency, separate private preparation from
+public commitment:
 
-The source store already has one coordinator and a bounded writer queue spanning
-reservation, R2 publication, confirmation, and blocking. Put the barrier through
-that queue. Earlier mutations finish or leave their existing durable pending state.
-A request still receiving its body has not published: its later commit uses the
-new generation. Request arrival time does not determine membership.
+1. Admit the attempt, receive and verify bounded bytes. Reserve growth credit in
+   durable metadata before permitting paid R2 work.
+2. Prepare the immutable payload in private R2, outside the commit queue. A
+   prepared object is not yet publicly readable.
+3. In a short SQL transaction, recheck the block/admission state and publish the
+   reference. Assign the **current** epoch and first-publication timestamp there.
+   A retry preserves the original publication facts. Flush durably before ACK.
 
-In one SQL transaction, capture small control/policy facts, record the cut at
-generation E, and advance allocation to E+1. Flush durably before releasing the
-queue or acknowledging the barrier. Production also needs a random snapshot ID,
-so restores/clones cannot reuse an old client's handle. The model uses only local
-generations. No scan, R2 enumeration, or source copying belongs inside the barrier.
-Its wait still depends on earlier queued R2 operations; a timeout must not release
-a writer lock while a remote mutation could still complete.
+The barrier is another short SQL transaction: capture bounded control/configuration
+facts, seal E, and advance the allocation epoch to E+1. No R2 operation, full-table
+scan, per-object relabelling or generation broadcast belongs inside it. Its durable
+ACK completes the pause. All later publication and block commits use E+1, even
+when their requests or R2 preparations started earlier.
 
-New receipts get immutable `born_generation`; old receipts need no relabelling.
-On the first later mutation of an old receipt, save its preimage in a shadow table
-in the **same transaction** as the live mutation. Keep that first preimage through
-subsequent changes. Snapshot reads use the preimage if present, otherwise the
-unchanged live row, and exclude rows born after E. Today's no-receipt-deletion
-rule simplifies membership. Deletion/eviction would need a preservation rule.
+The same coordinator assigns every commit's epoch; upload Workers do not cache
+or choose it. A synchronous SQL transaction cannot be interleaved halfway through
+by another commit. R2 awaits must be outside that critical section. Existing
+proof verification, duplicate verification and export reads also must not leave
+network awaits on a queue through which the barrier must pass.
 
-Extra retained history is proportional to old receipts changed during copying,
-not all uploads or all prior history. Most confirmed receipts never change;
-pending-to-stored transitions are the main case under today's rules. This adds
-small SQL writes, not another R2 source write per ordinary publication. Export
-still pays to read and copy the chosen bodies. An epoch shortens the pause; it
-does not by itself make the copy incremental or reduce those transfer operations.
+An already committed operation stays before the cut. An operation with preparation
+in flight can finish after it. A physical R2 write already issued cannot be
+magically postponed, but it has no authority to publish itself. This distinction
+makes the proposed pause precise rather than requiring distributed rollback.
 
-Migration can assign existing receipts generation 0; unknown historical timestamps
-stay unknown. This is a backup boundary, not a per-object ingestion counter or a
-replacement for a naming service's acceptance order.
+The healthy target is well below a second, not a pause proportional to the store
+or outstanding uploads. This is an engineering target, not a measured Cloudflare
+latency or SLA. Database replication, overload and failure can still delay the
+barrier; fail/retry rather than pretend a timed-out commit never happened. Measure
+wall-clock barrier latency and queued-commit delay with actual cloud fault tests.
 
-| Fact at the cut | Preservation required |
+This is a source-store boundary, not a pause of every Sprig service. With today's
+single metadata coordinator, no distributed atomic increment is needed. Future
+shards or a naming checkpoint spanning services would require coordinated cuts
+and dependency closure; do not introduce that machinery before it is needed.
+
+## Keep one-way facts instead of a general undo log
+
+Current blob semantics have at most one reservation, one publication, and one
+permanent block per address. Preserve those facts rather than overwriting one
+status field:
+
+| Fact | Immutable fields |
 | --- | --- |
-| Confirmed immutable source | Copy and verify exact bytes later; account for deletion/overwrite. |
-| Receipt and original submission time | Preserve the first preimage on later mutation. |
-| Small configuration and aggregate facts | Capture in the durable descriptor at the barrier. |
-| Pending reservation | Preserve original debit/time and pending status; see below. |
-| Blocked address | Preserve refusal; source bytes are excluded from its archive record. |
-| Tickets, live refill credit, sockets | No promise to resume them; restore conservatively. |
+| Reservation | Epoch, reserved-at time, bytes, growth debit. |
+| Publication | Epoch, submitted-at time; refers to verified immutable payload. |
+| Block | Epoch, blocked-at time. May exist without a reservation/publication. |
 
-Exact logical fields, unknown-metadata handling and derived-counter cross-checks
-need an archive v2 specification. Keep configuration needed to interpret historical
-facts; deployment-only settings need not all match at the destination. See the
-[simplicity review](../SERVICES.md#review-after-the-first-recovery-drill).
+For snapshot E, consider only facts whose epoch is at most E. An included
+publication with no included block has a source body. A reservation alone is an
+intent with no promised body. A block means refusal and excludes source from
+that cut. Live reads consider all committed facts, with blocking taking precedence.
+No per-snapshot shadow table, per-blob version chain, or global per-upload sequence
+is needed for these one-way transitions. The model's `seal` does no row scan or
+clone; its other table operations use arrays for clarity, not production efficiency.
 
-## Pending writes and the R2 boundary
+This simplification depends on permanent blocks and immutable publication facts.
+Unblock, rehydration, deletion of facts, mutable user metadata, or new overwrite
+semantics would need their own history rules. Naming order remains a separate
+service concern; an epoch does not establish the order of events within it.
 
-R2 offers strong consistency and atomic conditional writes for individual objects.
-It does not supply a transaction combining our SQLite records and a whole bucket.
-R2 listing is not a substitute for sealed receipt membership. Hash-addressed bytes
-help because ordinary successful publication never changes their content. Our
-block operation *does* replace that key with a tombstone.
+## Pending preparation is not partial publication
 
-Proposed first online format: a **logical committed-source snapshot**. Include
-bodies for receipts that were `stored` at the cut. Preserve pending reservations
-without a promised body, even if an ambiguous R2 write left bytes present. Later
-confirmation must not change that snapshot record. A retry after restore can
-supply the exact source again without a fresh growth debit.
+A reservation already committed before the barrier remains an accounting fact at
+E. Its later publication belongs wholly to E+1. It can have private bytes before
+or after the cut without changing the snapshot: that pending record has no body.
+We cannot erase the earlier reservation from the image while claiming to preserve
+already incurred quota/debit facts. Instead, make the two atomic commitments
+explicit: reserve resources, then publish a blob. This is the small write-ahead
+intent mechanism we already need to bound paid storage work.
 
-This is a policy proposal, not v1 behavior: v1 also copies a pending receipt's body
-if R2 contains it. Consulting R2 later for a pending row would produce changing
-snapshots as retries arrive. Preserving physical R2 presence at the cut would
-require extra version/presence tracking, or many R2 reads during the pause. Public
-reads can observe bytes before publication is confirmed, so the proposed logical
-cut does not describe every byte any reader might have seen.
+Keep reservation time separate from submission time, which is assigned at the
+first publication commit in the new design. Both survive retries and recovery.
+Restoring a pending reservation permits exact-source resubmission without a second
+growth debit; it does not invent a successful earlier publication. Conservative
+fresh quota credit and invalidation of old proof tickets still apply on restore.
 
-At each copy step, recheck snapshot identity/validity and materialize a bounded
-record under the writer queue. Do not hold that lock during a slow client download.
-Page by address using cut membership; new low-sorting addresses must not appear
-in an old page. Bounds, cursor rules, retries and restart behavior need actual
-R2 fault tests beyond the offline model.
+R2 metadata can carry intrinsic digest/validation information. Do not stamp an
+upload-start epoch into R2 and treat it as the publication epoch: the barrier can
+occur during the PUT. The SQL facts are the authority for commitment; the archive
+joins them to payloads. Consequently, backing up R2 alone cannot recover all the
+submission/block facts. Preserve the metadata store too.
 
-## Suppression wins over an unfinished backup
+## Blocks commit quickly; physical reclamation is separate
 
-The prototype takes a conservative policy: **any new block invalidates the active
-online snapshot**, including a block for an address born after the cut. Commit
-invalidation with the block refusal before the R2 tombstone attempt. Blocking
-then proceeds with its existing retry/failure behavior. No backup copy can delay
-it. Expiry or shadow-budget exhaustion similarly aborts the snapshot while allowing
-the ordinary mutation.
+Blocks pass through the same short metadata boundary. A block after E hides the
+blob from live requests while snapshot E still sees its earlier publication.
+Preserve the private immutable payload while that active snapshot needs it.
+Blocking does not wait for copying, and no longer invalidates a healthy snapshot.
+There is no tombstone overwrite of a payload that an active cut references.
 
-The exporter may have received some records. It needs an atomic final validity
-check before marking the copy complete; a partial file, cached header, or checksum
-alone cannot authorize completion. A block ordered before that check invalidates
-the attempt. A block after it is newer history, as with any completed snapshot.
-Frequent blocks can starve this simple policy; that is its explicit tradeoff.
+This requires the public GET/HEAD/304 path to consult current committed metadata.
+A request admitted before a simultaneous block may finish; requests checked after
+the block commit are refused. Prepared-but-unpublished objects are never served.
+Existing browser copies remain outside the origin's recall control.
 
-This does not erase downloaded or completed backups. Public replacement from an
-older snapshot still needs independently recoverable later suppression facts,
-applied before enabling reads. Invalidation prevents a falsely coherent export;
-it is not a suppression-history backup. A future alternative can pin old source
-versions privately alongside a newer block journal, but needs explicit retention,
-confidentiality and durability rules.
+**Cost/availability tradeoff:** an uncached public read adds a coordinator/metadata
+lookup before its single R2 GET. It also depends on metadata-service availability.
+This changes today's R2-only read path. Keeping that bypass while also making SQL
+the sole publication/block authority would be incorrect. A second R2 serving
+projection would bring back cross-store commit/recovery work. Measure the added
+RPC cost and latency before deployment; do not hide it in the barrier estimate.
 
-## Where the WAL idea belongs
+Physical deletion respects active snapshot references. With no reference requiring
+old bytes, blocked payloads can be reclaimed separately. A late prepare can leave
+an orphan even after a delete; its publication must recheck the block and fail.
+Reconciliation cleans such private leftovers, without refunding costs repeatedly
+or allowing a stale operation to resurrect public content. Bound preparation
+concurrency, reservation/reconciliation work, and retry charges independently of
+the short commit queue. Control commits need admission even when upload slots are
+full; do not put them behind a semaphore held by stalled preparations.
 
-SQLite WAL lets a reader keep an old database view while writers append changes.
-That database facility does not automatically become an online R2-plus-SQLite
-backup through the Durable Object API. A SQLite PITR bookmark also is not an
-independently stored copy of the source bucket.
+One active cut plus an explicit deadline bounds how long blocked bytes remain
+pinned. Bound export bytes/records/requests and retained private-byte exposure too,
+using maintained counters rather than an unbounded scan at seal. A backup that
+exceeds its lease fails; it cannot keep pins indefinitely. Reclamation must
+coordinate with sealing, expiry and release. Already completed backups still
+contain their old state; safe public restoration needs newer suppression history.
 
-Two application mechanisms serve different jobs:
+## Durability and completion
 
-- **A small undo journal:** the preimage table retains each changed old receipt
-  once for one active snapshot. It answers “what was true at this cut?” and can
-  be discarded after completion/abort. This is the smaller next step for copying
-  while accepting writes.
-- **An append-only redo journal:** durable admission, confirmation, suppression,
-  or naming facts rebuild state from a checkpoint plus a suffix. Naming especially
-  needs its own acceptance order/time. Log necessary facts, not a second copy of
-  every immutable source payload.
+Persist the epoch, selected cut, bounded configuration and all facts before their
+respective ACKs. Production handles also need an unpredictable snapshot ID so a
+restore/clone cannot accidentally reuse an old client's generation handle. An
+operation's timing is determined by the authoritative transaction, not a request's
+claimed epoch or timestamp. Crash before commit leaves an unpublished preparation;
+crash after commit but before ACK is an idempotent retry of that committed fact.
 
-A journal is “write-ahead” relative to a defined later effect/acknowledgement.
-Reservation intent does not prove R2 success; replaying a confirmation requires
-the body to be durable too. Replay must preserve original times, debits and service
-order and handle ambiguous operations idempotently. A log in the same lost account
-is not protection against losing that account. Asynchronous replication can lose
-acknowledged decisions; zero loss requires the relevant independent durability
-before the ACK.
+A sealed image is not yet an independently durable backup. Copy and verify every
+required body/fact, then finalize the still-valid snapshot and publish its complete
+archive manifest. Finalization and retry outcomes must survive restart, including
+lost replies. Release pins only through that protocol or explicit abort/expiry.
+The model's `release` is cleanup only; it does not simulate durable finalization.
 
-Do not add a second database transaction log merely for the epoch flip. Existing
-SQL transactions and durable flushes supply that local boundary. Specify the
-application redo journal's recovery interval and failure domain, especially for
-suppression and hosted names, before implementing it.
+The existing SQL durability mechanism protects the local transaction. An
+application redo journal is useful for recovering newer suppression/naming facts
+beyond a completed checkpoint, provided it reaches the intended independent failure
+domain. An asynchronous log copy can lose an acknowledged suffix. Decide acceptable
+loss and acknowledgement durability before promising zero loss. Immutable facts
+at the origin alone do not protect against losing that origin's account.
 
-## Sealed is not backed up
+## Implementation path without legacy constraints
 
-The cut specifies **which state** to copy. It does not protect uncopied source
-from loss of the original storage. Publish a complete manifest only after all
-required bodies and metadata have been copied, verified and made durable in the
-intended destination, and the coordinator has atomically approved completion of
-the still-valid cut. Finalization retries must distinguish completed, invalid,
-and unknown handles. Retain the completion outcome long enough to resolve a lost
-reply. The model's `release` is cleanup only, not that completion protocol.
+1. Replace the reservation/publication/block schema and visibility boundary. Keep
+   R2 preparation outside short durable commits, with bounded in-flight work.
+2. Replace the frozen archive/export path with epoch-filtered facts, pinned payloads,
+   and resumable completion. Update the local CLI, fixtures and recovery drill to
+   the new single format. No compatibility parser or old-schema migration is needed
+   for this undeployed service; local disposable data can be reset/reseeded.
+3. Exercise delayed R2 completion across the barrier, blocks on both sides, retries,
+   restart, missing bytes, pin expiry, garbage collection races and lost ACKs. Run
+   the restore into an isolated target, then the fern end-to-end check.
+4. Measure actual cloud barrier/read latency and operation costs before deployment.
 
-Keep one active cut initially. Bound its age, shadow rows **and bytes**, export
-records/bytes/requests, and cleanup work. Real receipt fields are bounded; the
-model accepts trusted test data and demonstrates only the row cap. Budget exhaustion
-aborts copying rather than letting a stalled exporter cause a write outage. Use
-bounded cleanup batches in production. Recover cut/shadows/finalization after
-restart; no correctness-critical marker may exist only in memory. Incremental
-copies can later reuse verified blobs by address; mutable facts still need capture.
+The updated offline tests cover held preparation across the cut, prepared bytes
+remaining invisible, all 24 orderings of later publication/block/admission,
+serialized restart, pinned reclamation, first-commit idempotency and stale handles.
+They do not substitute for the SQL/R2 fault tests required by the implementation.
 
-One coordinator makes this a local atomic barrier. With shards there is no instant
-“increment everywhere”: coordinate cuts and record per-shard positions, accounting
-for in-flight cross-shard operations where relevant. Channels are separate and
-ephemeral; no all-service freeze is needed to back up source. Add cross-service
-consistency for actual dependencies, such as a naming checkpoint whose referenced
-blobs must be available in its archive.
-
-## Next implementation boundary
-
-1. Specify logical archive v2 and compatibility, especially pending bodies.
-2. Choose loss tolerance and independently recoverable suppression history before
-   relying on periodic backups for safe public replacement.
-3. Add durable generation/preimage storage and bounded export/finalization. Retain
-   frozen v1 recovery while validating the new path.
-4. Repeat the loss drill with concurrent writes, ambiguous R2 outcomes, blocks,
-   restart, lost finalization replies, exhausted history budget and stale handles.
-
-References: [SQLite WAL](https://www.sqlite.org/wal.html),
-[R2 consistency](https://developers.cloudflare.com/r2/reference/consistency/),
-[Durable Object SQLite storage and PITR](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/).
+References: [Durable Object SQLite transactions and durability](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/),
+[R2 consistency](https://developers.cloudflare.com/r2/reference/consistency/).

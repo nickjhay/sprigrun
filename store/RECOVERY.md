@@ -1,7 +1,9 @@
 # Losing and finding the fern
 
-For the proposed short-barrier online successor, see [CHECKPOINTS.md](CHECKPOINTS.md).
-That document and its offline model do not change the v1 protocol below.
+For the proposed commit-only barrier and revised offline model, see
+[CHECKPOINTS.md](CHECKPOINTS.md). The Worker still implements the protocol below.
+Nothing has been deployed: the successor can replace this format outright; no
+legacy compatibility requirement should complicate that implementation.
 
 This first recovery slice makes a coordinated source-store snapshot and restores
 it into **fresh, isolated R2 and SQLite storage**. It preserves exact source bytes,
