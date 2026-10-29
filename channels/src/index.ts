@@ -134,10 +134,10 @@ export class ChannelHub extends DurableObject<Env> {
   private close(ws: WebSocket, code: number, reason: string): void {
     try { ws.close(code, reason); } catch { /* Already closed. */ }
   }
-  private push(ws: WebSocket, a: Attachment): void {
+  private push(ws: WebSocket, a: Attachment, prepared?: Batch): void {
     if (a.receipt || ws.readyState !== WebSocket.OPEN) return;
     if (a.expires <= Date.now()) { this.close(ws, 1000, 'subscription expired'); return; }
-    const batch = this.batch(a.address, `${a.epoch}_${a.cursor}`, a), text = JSON.stringify(batch);
+    const batch = prepared ?? this.batch(a.address, `${a.epoch}_${a.cursor}`, a), text = JSON.stringify(batch);
     this.chargeDelivery(text);
     a.receipt = batch.receipt!; a.sent = parseCursor(batch.cursor)!.seq; a.deadline = Date.now() + this.c.ackMs;
     ws.serializeAttachment(a); ws.send(text);
@@ -246,13 +246,16 @@ export class ChannelHub extends DurableObject<Env> {
     return json({ protocol: PROTOCOL, epoch, cursor: `${epoch}_${result.seq}`, ...result }, result.duplicate ? 200 : 201);
   }
   private subscribe(address: string, after: string | null): Response {
-    const first = this.batch(address, after), ch = this.channel(address);
+    const ch = this.channel(address);
+    const a: Attachment = { address, epoch: ch.epoch, cursor: 0, expires: Math.min(ch.expires, Date.now() + this.c.socketMs), receipt: null, sent: 0, deadline: 0 };
+    // Include receipt/lease fields in the frame-size budget. Construction and
+    // sending are synchronous: no append can make this prepared batch stale.
+    const first = this.batch(address, after, a);
+    a.cursor = a.sent = after === null ? first.earliest - 1 : parseCursor(after)!.seq;
     if (this.ctx.getWebSockets().length >= this.c.maxSockets || this.ctx.getWebSockets(address).length >= this.c.channelSockets) throw new HttpError(429, 'subscription_capacity', 'There are no free subscription slots. Use a bounded history read or try again later.', 30);
     const pair = new WebSocketPair(), client = pair[0], server = pair[1];
-    const start = after === null ? first.earliest - 1 : parseCursor(after)!.seq;
-    const a: Attachment = { address, epoch: ch.epoch, cursor: start, expires: Math.min(ch.expires, Date.now() + this.c.socketMs), receipt: null, sent: start, deadline: 0 };
     this.ctx.acceptWebSocket(server, [address]); server.serializeAttachment(a);
-    try { this.push(server, a); }
+    try { this.push(server, a, first); }
     catch (e) { this.close(server, 1013, 'delivery unavailable'); throw e; }
     this.bump('subscriptions_opened'); return new Response(null, { status: 101, webSocket: client, headers });
   }

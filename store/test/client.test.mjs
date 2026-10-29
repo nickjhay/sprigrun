@@ -59,10 +59,26 @@ test('browser upload solves the ticket without changing source and checks full a
   await assert.rejects(shareSource('https://example.test',source),/identity mismatch/);
 });
 
-test('already-written at challenge is idempotent for the helper without a PUT',async t=>{
-  let calls=0;
-  t.mock.method(globalThis,'fetch',async url=>{calls++;return url.pathname==='/b'?needWork():Response.json({error:'already_written'},{status:409});});
-  assert.equal(await shareSource('https://example.test','x'),address('x')); assert.equal(calls,2);
+for (const phase of ['challenge', 'publication']) test(`already-written at ${phase} needs fresh verified bytes before publication success`,async t=>{
+  const source='\ufeffx\r\n', a=address(source);
+  let reads=0, writes=0, stored=()=>new Response(source);
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    if(url.pathname==='/b')return needWork();
+    if(url.pathname.startsWith('/challenge/'))return phase==='challenge'
+      ?Response.json({error:'already_written'},{status:409}):Response.json(ticket(a));
+    assert.equal(url.pathname,`/b/${a}`);
+    if(options.method==='PUT'){writes++;return Response.json({error:'already_written'},{status:409});}
+    reads++;assert.equal(options.cache,'no-store');assert.equal(options.redirect,'error');assert.equal(options.credentials,'omit');
+    return stored();
+  });
+  assert.equal(await shareSource('https://example.test',source),a);
+  assert.equal(reads,1);assert.equal(writes,phase==='challenge'?0:1);
+  for(const status of [404,410,503]){
+    stored=()=>new Response(null,{status});
+    await assert.rejects(shareSource('https://example.test',source),new RegExp(`Load failed \\(${status}\\)`));
+  }
+  stored=()=>new Response('z'.repeat(Buffer.byteLength(source)));
+  await assert.rejects(shareSource('https://example.test',source),/digest mismatch/);
 });
 
 test('untrusted challenge parameters, excessive work and cancellation are bounded',async t=>{

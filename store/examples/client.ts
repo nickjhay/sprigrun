@@ -49,6 +49,12 @@ export async function shareSourceBytes(origin: string, input: Uint8Array, option
     if (result.address !== address || result.digest !== digest || result.bytes !== bytes.length) throw new Error('Upload identity mismatch');
     return address;
   };
+  const checkExisting = async () => {
+    // A permanent receipt can outlive its R2 object. Bypass the browser cache:
+    // publication success must establish a readable copy at the selected store.
+    await fetchSource(origin, address, options.signal, 'no-store');
+    return address;
+  };
   // The common, no-work case is one request. Only an explicit work requirement
   // starts the challenge flow; network/server failures never cause an auto-retry.
   const direct = await fetch(new URL('/b', origin), {
@@ -62,7 +68,7 @@ export async function shareSourceBytes(origin: string, input: Uint8Array, option
     method: 'POST', credentials: 'omit', redirect: 'error', signal: deadline(options.signal),
   });
   const ticket = await responseJson(issued);
-  if (issued.status === 409 && ticket?.error === 'already_written') return address;
+  if (issued.status === 409 && ticket?.error === 'already_written') return checkExisting();
   if (!issued.ok) problem(issued, ticket);
   if (!validChallenge(ticket) || ticket.address !== address) throw new Error('Challenge address/format mismatch');
   const nonce = await solveChallenge(ticket, options);
@@ -71,15 +77,19 @@ export async function shareSourceBytes(origin: string, input: Uint8Array, option
     credentials: 'omit', redirect: 'error', signal: deadline(options.signal),
   });
   const result = await responseJson(response);
-  if (response.status === 409 && result?.error === 'already_written') return address;
+  if (response.status === 409 && result?.error === 'already_written') return checkExisting();
   if (!response.ok) problem(response, result);
   return checkPublished(result);
 }
 
 export async function loadSource(origin: string, address: string, signal?: AbortSignal): Promise<{ bytes: Uint8Array; source: string }> {
+  return fetchSource(origin, address, signal, 'default');
+}
+
+async function fetchSource(origin: string, address: string, signal: AbortSignal | undefined, cache: 'default' | 'no-store'): Promise<{ bytes: Uint8Array; source: string }> {
   const parsed = parseAddress(address);
   if (!parsed) throw new Error('Invalid address');
-  const response = await fetch(new URL(`/b/${address}`, origin), { credentials: 'omit', redirect: 'error', signal: deadline(signal) });
+  const response = await fetch(new URL(`/b/${address}`, origin), { credentials: 'omit', redirect: 'error', signal: deadline(signal), cache });
   if (!response.ok) throw new Error(`Load failed (${response.status})`);
   const bytes = await readLimited(response, parsed.bytes);
   if (bytes.length !== parsed.bytes) throw new Error('Downloaded blob length mismatch');

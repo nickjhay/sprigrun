@@ -85,6 +85,19 @@ test('WebSocket catch-up, live order, ACK backpressure and a gap after slow read
   await appendText(s.origin,k.secret,c.epoch,'both');assert.equal((await second.next()).messages[0].text,'both');assert.equal((await sub.next()).messages[0].text,'both');
 });
 
+test('initial WebSocket batch budgets escaped text and receipt fields before continuing on ACK', {timeout:15000},async t=>{
+  const s=await fixture(t),k=await keys(),c=await createChannel(s.origin,k.secret);
+  for(let i=0;i<3;i++)await appendText(s.origin,k.secret,c.epoch,'\u0000'.repeat(4096));
+  const sub=await socket(s.origin,k.address);t.after(()=>sub.ws.close());
+  const first=await sub.next();
+  assert.ok(enc.encode(JSON.stringify(first)).byteLength<=65536);
+  assert.match(first.receipt,/^[0-9a-f]{32}$/);
+  assert.ok(first.subscription_expires_at_ms<=first.expires_at_ms);
+  assert.deepEqual(first.messages.map(m=>m.seq),[1,2]);assert.equal(first.has_more,true);assert.equal(first.gap,false);
+  sub.ack(first);const next=await sub.next();
+  assert.deepEqual(next.messages.map(m=>m.seq),[3]);assert.equal(next.has_more,false);sub.ack(next);
+});
+
 test('age expiry, channel recreation, quota bounds and restart persistence', {timeout:30000},async t=>{
   const temp=await mkdtemp(join(tmpdir(),'sprig-channels-'));t.after(()=>rm(temp,{recursive:true,force:true}));
   const vars={MAX_CHANNELS:'1',MAX_TICKETS:'1',MESSAGE_AGE_SECONDS:'1',CHANNEL_LIFETIME_SECONDS:'3',REQUEST_BURST:'1000'};

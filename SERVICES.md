@@ -5,6 +5,10 @@ local launchers, and offline naming experiments. The small refactors below are
 implemented. The hosted naming API and retention classes are agreed directions,
 not new deployed endpoints or a garbage collector.
 
+The [review after the first recovery drill](#review-after-the-first-recovery-drill)
+below adds two implemented cleanups and identifies the next design decisions.
+It does not change the v1 archive format or the current channel proof protocol.
+
 ## One publishing request above the blob store
 
 The naming endpoint will receive the complete genesis/update **bytes**, verify
@@ -151,9 +155,9 @@ enforce the byte-identity promise. Body bounds and timeouts are also substantive
 Combining all of these into a generic service framework would hide their ordering.
 
 The main remaining read-cost candidate is channel trimming: `batch()` enforces
-age/count/byte retention before every delivery, and subscription setup builds a
-batch twice. Count/byte trimming could move to append, with age-aware read queries
-and reuse of the initial batch. Preserve cursor gaps, escaped frame-size bounds,
+age/count/byte retention before every delivery. Subscription setup now reuses its
+initial batch, including receipt/lease fields in the frame-size budget. Count/byte
+trimming could move to append, with age-aware read queries. Preserve cursor gaps, escaped frame-size bounds,
 ACK backpressure, and behavior when configured retention limits are reduced.
 This needs a focused change and tests; it is not changed in this pass.
 
@@ -171,3 +175,155 @@ storage cost over time. No new cost ceiling or deployed billing claim is made.
 
 References checked October 29: [R2 Workers API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/)
 and [SQLite Durable Object storage](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/).
+
+## Review after the first recovery drill
+
+29 October 2026. Reviewed recovery, admission/proofs, channel delivery, naming
+experiments and the workbench/runtime boundary at `12d1cdf`, then made the small
+changes below. The recommendations are design proposals, not deployed behavior.
+
+### Implemented cleanups
+
+- **One publication-success contract in the bundled client.** A PoW-path
+  `already_written` response now triggers one verified GET with browser caching
+  disabled. A receipt alone can survive a missing R2 object. Both the challenge
+  refusal and a racing PUT refusal use the same check; missing, blocked, corrupt
+  or unavailable bytes fail explicitly. The ordinary zero-work POST remains one
+  request, and normal source reads retain browser caching. This aligns the helper
+  with the existing `/help` instructions. Success establishes availability at the
+  check, never a promise of future retention.
+- **One first channel batch.** Subscription setup prepares and sends the same
+  bounded batch, instead of trimming/querying/serializing a throwaway batch and
+  building another. It includes the receipt and lease in the size calculation,
+  and no await separates preparation from sending. Cursor gaps, ACK backpressure,
+  hibernation and later delivery remain unchanged.
+- The workbench says “Publishing this source snapshot…” without claiming every
+  publication needs a proof. This matches the default direct POST path.
+
+### Keep facts, derived state and live controls distinct
+
+| State | Role | Simplification direction |
+| --- | --- | --- |
+| Exact source + original receipt time/debit/status | Historical facts, including pending reservations and blocks | Preserve; bytes alone cannot reconstruct these. |
+| Current refill balances | Live admission control | Keep authoritative while running. Restore still starts at zero; do not infer balances from aggregate receipts. |
+| Five receipt totals | Incrementally maintained aggregates | Keep for cheap stats and consistency checks; derive/check them from receipts during recovery. They do not constitute a separate history. |
+| Proof tickets | Short-lived admission rights | Keep bounded and single-use; omit from backups and invalidate on restore. |
+| Naming admissions and their policy epoch | Historical service decisions | Persist before hosting names. The selected head is a projection of these facts and signed records. |
+| Channel messages/cursors | Ephemeral state within an incarnation | Retention gaps are normal. Restore continuity must never silently reuse an old epoch. |
+| Workspace draft / running instance | User work versus a particular execution | Keep separate lifetimes. A saved draft is not a checkpoint of a running VM. |
+
+### 1. Make the next archive a logical store format
+
+The v1 archive intentionally captures the whole `Control` and `Config` structures
+and R2 custom/HTTP metadata. This was convenient for the first exact roundtrip,
+but carries implementation details into recovery:
+
+- Four saved balances are validated and then discarded by zero-credit restore.
+- Restore requires an identical entire configuration, so changing even the
+  browser cache duration or upload timeout rejects it.
+- R2 HTTP metadata is copied although public serving constructs its own headers.
+- `policyEnv()` maps an archive configuration back through environment variables
+  to validate it. That is coupling between deployment setup and the archive.
+
+For a future explicit format version, prefer original receipt facts, exact bytes,
+per-object validation contract, needed operator policy, and integrity checkpoints.
+Construct fresh paused controls separately. Keep source configuration as provenance
+if useful, without requiring every operational setting to match the target.
+Historical naming policy remains different: changing it can change replay results.
+The stored validation policy still determines how an older blob is read, regardless
+of the target's current admission policy.
+
+Do not silently drop metadata, change v1 meanings, or reinterpret already saved
+archives. Specify unknown-field/extension handling and migration first. Keep the
+aggregate cross-check and ordered checksum: deliberate redundancy detects drift.
+Base64 is still useful for exact bytes and a predictable size bound, including
+NUL-heavy UTF-8. Reformatting source or inventing a general serialization language
+would not simplify this recovery boundary.
+
+### 2. Separate snapshot restoration from live replacement
+
+The current restore is a fresh isolated copy of one consistent snapshot. It cannot
+discover blocks or admissions acknowledged after that snapshot. Making an older
+copy public needs that newer history or an explicit acceptance of the known loss.
+Zeroing refill credit and clearing tickets do not recover a forgotten block.
+
+Recommendation: retain the narrow restore contract. Before depending on periodic
+backups for a public service, choose the allowed loss interval and an independently
+recoverable suppression history. If zero loss of acknowledged admissions is wanted,
+that requires an acknowledgement/durability design too; an extra asynchronous log
+alone is insufficient. Do not introduce a universal service event framework just
+to give the existing snapshot tool a broader name.
+
+Keep the durable maintenance session and explicit `RESTORE_MODE` gate. A pause
+flag alone would still allow administrative changes during export. Removing the
+deployment gate during a partial restore can expose reads because ordinary blob
+reads intentionally bypass the coordinator. That operator-controlled cutover is
+a real boundary, not two interchangeable ways of pausing the same operation.
+
+### 3. Decide the scale of the write-pause window
+
+The export makes one serial HTTP/DO request per receipt, plus page requests and
+one R2 GET for each non-blocked receipt. Writes and administrative changes remain
+frozen while it runs. The snapshot is simple to reason about; the pause grows with
+the entire store, not just that day's new data.
+
+At steady-state saturation, 100 MiB/day divided by an 8 KiB minimum debit permits
+12,800 new small-object reservations/day, about 4.67 million/year. This is an upper
+envelope from the configured quota, not observed traffic. The CLI's default
+100,000-record safety limit would be reached in about eight such days. At a
+*hypothetical* 100 ms per record round trip, one day's receipts alone take roughly
+21 minutes to export serially; neither latency nor cloud CPU has been measured.
+
+Recommendation: use the existing drill for the bootstrap, measure a realistic
+population before scheduling backups, and set record/byte/time limits explicitly.
+If round trips dominate, bounded pages of full records are the first candidate.
+Incremental copies or online snapshots need a change-history design and should
+follow an actual recovery/pause requirement. Do not add concurrency until it has
+explicit object, byte, request and interruption bounds.
+
+### 4. Keep eviction different from suppression
+
+Today there is no automatic eviction. A `stored` receipt with no R2 object is an
+integrity/availability failure. Publication refuses to recreate it; a `blocked`
+receipt is a permanent refusal. These are deliberate current rules.
+
+Before adding pressure reclamation, decide whether an intentionally evicted blob
+can be supplied again, how that affects growth debit, and which timestamps it
+keeps. Record intentional eviction if it changes those rules; do not infer it
+from missing bytes. A duplicate remains the same content identity even if a later
+physical storage event occurs. Keep original submission time separate from any
+future rehydration time. Suppression must continue to override re-upload.
+
+### 5. Align zero-work ergonomics without merging protocols
+
+The store defaults to direct POST with no ticket; channels still require a
+challenge even when configured difficulty is zero. A prospective channel update
+could allow directly authorized create/append when work is off, using existing
+request/creation/ingress limits. Retain message IDs, incarnation checks, duplicate
+handling, body bounds, and a policy recheck after reading the body. Zero work
+removes proof ceremony, not authentication, ordering or admission control.
+
+This is a proposed API change. Keep domain-separated challenge formats and the
+different authority models: public blob submission, secret-authorized channel
+append, and signed naming updates. The shared integer bucket and work arithmetic
+are the useful common code already extracted. A generic coordinator would obscure
+the different transaction and await boundaries.
+
+### 6. Keep the next naming and runtime steps narrow
+
+For hosted names, prefer parent-before-child **naming admission**, while allowing
+ordinary blob uploads in any order. That avoids a persistent orphan-resolution
+queue. Reuse record verification; keep the ordered selector as the sole service
+head rule. The unordered graph resolver remains a useful offline experiment.
+Preserve admission facts and recovery capacity; the 256-node experiment cap must
+not become a permanent lifetime cap on a public name. A name can initially point
+straight to root source; a project manifest is needed only when it has concrete
+multi-file or metadata semantics. Hash imports already pin dependencies.
+
+For the workbench, the useful boundary is still one trusted shell, a cancellable
+execution session, and explicit input/output/verified-load operations. Add the
+real Sprig adapter there. Workspace persistence, UI attachment and VM lifetime
+can then grow separately. Generalizing the finite Moss worker into a scheduler,
+or implementing a Sprig IDE before that adapter works, adds decisions without
+testing the boundary we currently need. Keep the small visible fern as an
+end-to-end check while the implementation underneath changes.

@@ -135,7 +135,7 @@ async function publish():Promise<void> {
   if(!origin||publishJob.busy||pendingShared)return;
   requireHashing();
   const generation=++publishGeneration,snapshot=source.snapshot(),store=origin;
-  notice('Preparing a single-use proof and publishing this source snapshot…');
+  notice('Publishing this source snapshot…');
   const promise=publishJob.run<string>({origin:store,bytes:snapshot.bytes},65000);updateButtons();
   try {
     const address=await promise;if(generation!==publishGeneration)return;
