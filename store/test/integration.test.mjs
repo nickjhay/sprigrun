@@ -72,6 +72,92 @@ const post = (mf, bytes, headers = {}) => request(mf, '/b', { method: 'POST', bo
   headers: { 'Content-Type': 'text/plain; charset=utf-8', ...headers } });
 const admin = (mf, path, token = TOKEN) => request(mf, `/admin/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
 
+test('documentation discovery works without a usable store and verifies the exact skill bytes', async t => {
+  // Invalid storage configuration proves that these routes do not initialize the
+  // coordinator or require its live policy. Use the actual deployed entrypoint.
+  const mf = use(t, { MAX_BLOB_BYTES: 'invalid' }, true);
+  const help = await request(mf, '/help');
+  assert.equal(help.status, 200);
+  const instructions = await help.text();
+  assert.match(instructions, /--data-binary @world\.sprig/);
+  assert.match(instructions, /POST \/challenge\/b\/\{address\}/);
+  assert.match(instructions, /nonce \+ "\\n"/);
+
+  const index = await (await request(mf, '/.well-known/agent-skills/index.json')).json();
+  assert.equal(index.$schema, 'https://schemas.agentskills.io/discovery/0.2.0/schema.json');
+  assert.equal(index.skills.length, 1);
+  const entry = index.skills[0];
+  assert.equal(entry.type, 'skill-md');
+  const skill = await request(mf, entry.url);
+  const artifact = Buffer.from(await skill.arrayBuffer());
+  assert.equal(entry.digest, `sha256:${digestOf(artifact)}`);
+  assert.equal(artifact.toString(), `---\nname: ${entry.name}\ndescription: ${entry.description}\n---\n\n${instructions}`);
+
+  const llms = await (await request(mf, '/llms.txt')).text();
+  const links = [...llms.matchAll(/\]\((\/[^)]*)\)/g)].map(match => match[1]);
+  // The root is deliberately broken in this fixture; every documentation link
+  // must still resolve, with proper HEAD, CORS and method/error semantics.
+  for (const path of links.filter(path => path !== '/')) {
+    const get = await request(mf, path);
+    assert.equal(get.status, 200, path);
+    assert.equal(get.headers.get('Cache-Control'), 'public, max-age=300');
+    assert.equal(get.headers.get('Access-Control-Allow-Origin'), '*');
+    assert.match(get.headers.get('Access-Control-Expose-Headers'), /\bLink\b/);
+    assert.match(get.headers.get('Link'), /<\/help>; rel="help service-doc"/);
+    assert.match(get.headers.get('Link'), /rel="api-catalog"/);
+    assert.equal(get.headers.get('X-Content-Type-Options'), 'nosniff');
+    const head = await request(mf, path, { method: 'HEAD' });
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get('Content-Type'), get.headers.get('Content-Type'));
+    assert.equal(await head.text(), '');
+    const options = await request(mf, path, { method: 'OPTIONS' });
+    assert.equal(options.status, 204);
+    assert.equal(options.headers.get('Access-Control-Allow-Methods'), 'GET, HEAD, OPTIONS');
+    const wrong = await request(mf, path, { method: 'POST', body: 'unused' });
+    assert.equal(wrong.status, 405);
+    assert.equal(wrong.headers.get('Allow'), 'GET, HEAD, OPTIONS');
+    assert.equal((await wrong.json()).help, '/help');
+  }
+  const catalogResponse = await request(mf, '/.well-known/api-catalog');
+  assert.equal(catalogResponse.headers.get('Content-Type'), 'application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"');
+  const catalog = await catalogResponse.json();
+  assert.equal(catalog.linkset[0].item[0].href, 'https://blobs.example.test/b');
+  assert.equal(catalog.linkset[1].anchor, 'https://blobs.example.test/b');
+  assert.equal(catalog.linkset[1]['service-doc'][0].href, 'https://blobs.example.test/help');
+  const local = await mf.dispatchFetch('http://localhost:8787/.well-known/api-catalog');
+  assert.equal((await local.json()).linkset[1]['service-doc'][0].href, 'http://localhost:8787/help');
+  assert.equal((await request(mf, '/help?unexpected=true')).status, 400);
+  assert.equal((await request(mf, '/')).status, 503);
+});
+
+test('root stats and errors advertise help without losing statuses or retry delays', async t => {
+  const mf = use(t, {}, true);
+  const root = await request(mf, '/');
+  assert.match(await root.text(), /^help \/help\n/);
+  for (const path of ['/unknown', '/.well-known/agent-skills/missing/SKILL.md']) {
+    const absent = await request(mf, path);
+    assert.equal(absent.status, 404);
+    assert.equal((await absent.json()).help, '/help');
+  }
+  const method = await request(mf, '/b');
+  assert.equal(method.status, 405);
+  assert.equal((await method.json()).help, '/help');
+  await admin(mf, 'pow/1/0');
+  const proof = await post(mf, 'source');
+  assert.equal(proof.status, 428);
+  const detail = await proof.json();
+  assert.equal(detail.help, '/help');
+  assert.match(detail.message, /solve|search/i);
+  await admin(mf, 'pause');
+  const paused = await post(mf, 'source');
+  assert.equal(paused.status, 503);
+  const error = await paused.json();
+  assert.equal(error.help, '/help');
+  assert.equal(error.retry_after_seconds, Number(paused.headers.get('Retry-After')));
+  assert.ok(error.retry_after_seconds > 0);
+  assert.equal((await request(mf, '/help')).status, 200);
+});
+
 test('production entrypoint round-trips exact bytes, hash, HEAD and conditional GET', async t => {
   const mf = use(t, {}, true);
   const bytes = Buffer.from('\ufefffrom world.v4 import *\r\n# café\0\n');

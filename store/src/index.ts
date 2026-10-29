@@ -3,12 +3,13 @@ import { config, type Config } from './config.ts';
 import { checkUploadHeaders, objectKey, readBounded, verifiedBody } from './bytes.ts';
 import { parseAddress, proofPrefix, TICKET_ID, NONCE } from './proof.ts';
 import { failure, HttpError, type Env, type Failure } from './types.ts';
+import { documentation, DISCOVERY_LINKS } from './help.ts';
 
 export { StoreCoordinator } from './coordinator.ts';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Expose-Headers': 'ETag, Location, Retry-After',
+  'Access-Control-Expose-Headers': 'ETag, Location, Retry-After, Link',
 };
 const SECURITY = {
   'X-Content-Type-Options': 'nosniff',
@@ -23,7 +24,8 @@ function json(value: unknown, status = 200, extra: HeadersInit = {}): Response {
 }
 
 function failed(result: Failure): Response {
-  return json({ error: result.error, message: result.message, proof_of_work: result.proof_of_work }, result.status,
+  return json({ error: result.error, message: result.message, proof_of_work: result.proof_of_work,
+    help: '/help', retry_after_seconds: result.retryAfter }, result.status,
     result.retryAfter === undefined ? {} : { 'Retry-After': String(result.retryAfter) });
 }
 
@@ -87,8 +89,21 @@ async function admin(request: Request, env: Env, url: URL): Promise<Response> {
 }
 
 async function route(request: Request, env: Env, ctx: ExecutionContext, url: URL): Promise<Response> {
-  const policy = config(env);
   if (url.search) throw new HttpError(400, 'query_parameters_not_supported');
+  const doc = documentation(url);
+  if (doc) {
+    const allow = 'GET, HEAD, OPTIONS';
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: {
+      'Access-Control-Allow-Methods': allow, 'Access-Control-Max-Age': '86400', 'Cache-Control': 'no-store',
+    } });
+    if (!['GET', 'HEAD'].includes(request.method)) {
+      return json({ error: 'method_not_allowed', help: '/help' }, 405, { Allow: allow });
+    }
+    return new Response(doc.body, { headers: {
+      'Content-Type': doc.type, 'Cache-Control': 'public, max-age=300',
+    } });
+  }
+  const policy = config(env);
   if (url.pathname.startsWith('/admin/')) return admin(request, env, url);
   const address = url.pathname.startsWith('/b/') ? url.pathname.slice(3) : '';
   const blob = parseAddress(address);
@@ -108,7 +123,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext, url: URL
     let response = await caches.default.match(key);
     if (!response) {
       const stats = await coordinator(env).stats();
-      const text = Object.entries(stats).map(([key, value]) => `${key} ${value}`).join('\n') + '\n';
+      const text = 'help /help\n' + Object.entries(stats).map(([key, value]) => `${key} ${value}`).join('\n') + '\n';
       response = new Response(text, { headers: {
         'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=5, s-maxage=5',
       } });
@@ -159,7 +174,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext, url: URL
     return json({ address, digest: result.value.digest, bytes: result.value.bytes, url: path,
       submitted_at_ms: result.value.submitted_at_ms }, 201, { Location: path });
   }
-  return json({ error: 'method_not_allowed' }, 405, { Allow: challenge || collection ? 'POST, OPTIONS' : blob ? 'GET, HEAD, PUT, OPTIONS' : 'GET, HEAD, OPTIONS' });
+  return json({ error: 'method_not_allowed', help: '/help' }, 405, { Allow: challenge || collection ? 'POST, OPTIONS' : blob ? 'GET, HEAD, PUT, OPTIONS' : 'GET, HEAD, OPTIONS' });
 }
 
 export default {
@@ -172,7 +187,7 @@ export default {
         response = failed(failure(error.status, error.code, error.retryAfter));
       } else {
         console.error('request_failed');
-        response = json({ error: 'service_unavailable' }, 503, { 'Retry-After': '5' });
+        response = failed(failure(503, 'service_unavailable', 5));
       }
     }
     // Cached Responses may have immutable headers. Always make a writable copy.
@@ -180,6 +195,7 @@ export default {
     for (const [key, value] of Object.entries(SECURITY)) response.headers.set(key, value);
     if (!url.pathname.startsWith('/admin/')) {
       for (const [key, value] of Object.entries(CORS)) response.headers.set(key, value);
+      response.headers.set('Link', DISCOVERY_LINKS);
     }
     return response;
   },
