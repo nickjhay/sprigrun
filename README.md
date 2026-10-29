@@ -8,6 +8,8 @@ The **collapsible corner editor**, direct view without the editor, and 10-column
 
 The separate **public, expiring channel** service from 0.3 remains included: create a rolling text log, share a reading or participant link, and follow it live from another tab or native client. See [channels/README.md](channels/README.md) for the protocol and [channels/DESIGN.md](channels/DESIGN.md) for its decision record.
 
+The next naming and commons steps are recorded in [NEXT.md](NEXT.md). An **offline naming experiment** now exercises genesis hashes, signed updates, stronger-key recovery and key rotation: run `npm run demo:names` with Node 24. It needs no Cloudflare runtime, uploads nothing, and keeps its temporary keys only in memory. [NAMING.md](NAMING.md) explains the draft rules, revision/finality questions and current limits. No naming service or browser naming UI is deployed.
+
 ## Run the whole system locally
 
 Use Node **24** (`.nvmrc` pins the version used by CI). With [nvm](https://github.com/nvm-sh/nvm), run:
@@ -106,7 +108,7 @@ GitHub Actions runs the same checks on pushes to `main` and on pull requests. It
 npm run check
 ```
 
-This runs TypeScript checking for the frontend and channel server, 37 workbench tests, the real-store/real-worker integration test, nine channel tests, and the production build. The tests cover complete digest round trips, routes, retained editor nodes, restart with late output, publication while editing, and failed links protecting a saved private draft. The fern is executed both with local words and a graft; the store integration also loads and runs its published root and library through the actual worker bridge. Controller tests use LinkeDOM with emulated focus and selection; they do not establish browser rendering, IME, native undo, or layout behavior. The store and channel tests run their actual Workers locally. They never deploy or contact a production service.
+This runs TypeScript checking for the frontend and channel server, 37 workbench tests, 12 offline naming tests, the real-store/real-worker integration test, nine channel tests, and the production build. The tests cover complete digest round trips, routes, retained editor nodes, restart with late output, publication while editing, and failed links protecting a saved private draft. The fern is executed both with local words and a graft; the store integration also loads and runs its published root and library through the actual worker bridge. Controller tests use LinkeDOM with emulated focus and selection; they do not establish browser rendering, IME, native undo, or layout behavior. The store and channel tests run their actual Workers locally. They never deploy or contact a production service.
 
 Browser QA covered the example menu, arithmetic/string output, terminal replies and Stop. The managed preview is served over a non-local HTTP hostname, which lacks browser Web Crypto; browser publication and verified loading could not be exercised there. Those paths passed the actual local-store integration test, including the browser worker code through a Node worker bridge. Mobile layout and target-browser coverage remain future checks.
 

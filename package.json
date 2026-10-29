@@ -15,6 +15,8 @@
     "check": "npm run typecheck && npm test && npm run test:store && npm run test:channels && npm run build",
     "test:store": "node --test test/store.integration.mjs",
     "seed": "node scripts/seed.mjs",
+    "predemo:names": "node scripts/check-node.mjs",
+    "demo:names": "node scripts/name-garden.mjs",
     "test:channels": "node --test --test-concurrency=1 channels/test/*.test.mjs"
   },
   "devDependencies": {
