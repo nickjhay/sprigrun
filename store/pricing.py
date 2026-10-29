@@ -17,7 +17,11 @@ This is a scenario model, NOT a bill cap. It assumes allowances are available
 to this service; edit Prices for remaining account allowances. All network blob
 GETs/HEADs cost a Worker request and conservatively one R2 read, including 304s.
 Browser cache hits never reach the service and are excluded from --reads.
-New uploads use two Worker requests, three DO RPCs and one R2 PUT.
+The modeled challenge-first uploads use two Worker requests, three DO RPCs and
+one R2 PUT. Direct no-work POST uses one Worker request, two DO RPCs and no ticket
+rows. This model over-allocates upload overhead for that path. An automatic
+client's rejected POST before a challenge needs one extra Worker/DO request and
+attempt credit when work is enabled; account for it in extra request counts.
 The model additionally allows one R2 read per upload for reconciliation; the
 common new-object path no longer needs that read.
 Challenge issuance uses a receipt lookup, with no R2 request. Outstanding tickets

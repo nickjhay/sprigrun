@@ -35,6 +35,8 @@ export class StoreCoordinator extends Base {
   testFault(mode: string) { this.fault.mode = mode; }
   testStorageCalls() { return { gets: this.fault.gets, puts: this.fault.puts }; }
   testExpire() { this.ctx.storage.sql.exec('UPDATE tickets SET expires = 1'); }
+  testReceipt(address: string) { return this.ctx.storage.sql.exec('SELECT * FROM receipts WHERE address = ?', address).toArray()[0]; }
+  testForgetTimes() { this.ctx.storage.sql.exec('ALTER TABLE receipts DROP COLUMN submitted_at_ms'); }
   testLegacy() {
     const row = this.ctx.storage.sql.exec<{value:string}>('SELECT value FROM control WHERE id=1').one();
     this.ctx.storage.sql.exec('UPDATE control SET value=? WHERE id=1', JSON.stringify({...JSON.parse(row.value), schema:1}));
@@ -47,10 +49,18 @@ export default {
     const store = env.STORE.get(env.STORE.idFromName('global')) as unknown as DurableObjectStub<StoreCoordinator>;
     if (path === '/__test/expire') { await store.testExpire(); return new Response('ok'); }
     if (path === '/__test/legacy') { await store.testLegacy(); return new Response('ok'); }
+    if (path === '/__test/forget-times') { await store.testForgetTimes(); return new Response('ok'); }
+    if (path.startsWith('/__test/receipt/')) return Response.json(await store.testReceipt(path.slice('/__test/receipt/'.length)));
     if (path === '/__test/probe') {
       let pulls = 0;
-      const stream = new ReadableStream<Uint8Array>({ pull(c) { pulls++; if (!request.headers.has('Test-Stall')) c.enqueue(new Uint8Array([65])); } }, { highWaterMark: 0 });
-      const probe = new Request('https://blobs.example.test' + request.headers.get('Test-Path'), { method:'PUT', headers:request.headers, body:stream });
+      const stream = new ReadableStream<Uint8Array>({ async pull(c) {
+        pulls++;
+        if (request.headers.has('Test-Pow-On-Read')) await store.setProofOfWork(1, 0);
+        if (request.headers.has('Test-Body')) { c.enqueue(new TextEncoder().encode(request.headers.get('Test-Body')!)); c.close(); }
+        else if (!request.headers.has('Test-Stall')) c.enqueue(new Uint8Array([65]));
+      } }, { highWaterMark: 0 });
+      const probe = new Request('https://blobs.example.test' + request.headers.get('Test-Path'), {
+        method:request.headers.get('Test-Method') ?? 'PUT', headers:request.headers, body:stream });
       const result = await service.fetch(probe,env,ctx);
       result.headers.set('Test-Body-Pulls',String(pulls));
       return result;

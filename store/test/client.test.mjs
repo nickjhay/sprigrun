@@ -5,6 +5,23 @@ import { loadSource, shareSource, shareSourceBytes, solveChallenge } from '../ex
 const digest=b=>createHash('sha256').update(b).digest('hex');
 const address=b=>`${digest(b)}_${Buffer.byteLength(b)}`;
 const ticket=a=>({protocol:'blob-store-upload-v1',id:'1'.repeat(64),address:a,expires_at_ms:Date.now()+600000,target:'f'.repeat(64)});
+const needWork=()=>Response.json({error:'proof_required'},{status:428});
+
+test('zero-work browser upload uses one POST, checks identity and preserves caller bytes',async t=>{
+  const bytes=new Uint8Array([65]), a=address(bytes);
+  const mock=t.mock.method(globalThis,'fetch',async(url,options)=>{
+    bytes[0]=66;
+    assert.equal(url.pathname,'/b'); assert.equal(options.method,'POST');
+    assert.equal(options.credentials,'omit'); assert.equal(options.redirect,'error');
+    assert.deepEqual(options.body,new Uint8Array([65]));
+    assert.equal(options.headers['Blob-Ticket'],undefined);
+    return Response.json({address:a,digest:digest('A'),bytes:1});
+  });
+  assert.equal(await shareSourceBytes('https://example.test',bytes),a);
+  assert.equal(mock.mock.callCount(),1);
+  mock.mock.mockImplementation(async()=>Response.json({address:a,digest:'0'.repeat(64),bytes:1}));
+  await assert.rejects(shareSource('https://example.test','A'),/identity mismatch/);
+});
 
 test('browser client verifies exact bytes before decoding, including BOM and CRLF',async t=>{
   const source='\ufefffrom world.v4 import *\r\n', bytes=Buffer.from(source);
@@ -29,6 +46,7 @@ test('browser upload solves the ticket without changing source and checks full a
   let uploaded, c;
   const mock=t.mock.method(globalThis,'fetch',async(url,options)=>{
     assert.equal(options.credentials,'omit'); assert.equal(options.redirect,'error');
+    if(url.pathname==='/b')return needWork();
     if(options.method==='POST'){c=ticket(a);assert.equal(url.pathname,`/challenge/b/${a}`);return Response.json(c);}
     assert.equal(options.method,'PUT'); assert.equal(options.headers['Blob-Ticket'],c.id);
     assert.match(options.headers['Blob-Nonce'],/^[0-9a-f]{16}$/);
@@ -37,18 +55,18 @@ test('browser upload solves the ticket without changing source and checks full a
   });
   assert.equal(await shareSource('https://example.test',source),a);
   assert.deepEqual(uploaded,Buffer.from(source));
-  mock.mock.mockImplementation(async(_,o)=>o.method==='POST'?Response.json(ticket(a)):Response.json({address:a,digest:'0'.repeat(64),bytes:Buffer.byteLength(source)}));
+  mock.mock.mockImplementation(async(url,o)=>url.pathname==='/b'?needWork():o.method==='POST'?Response.json(ticket(a)):Response.json({address:a,digest:'0'.repeat(64),bytes:Buffer.byteLength(source)}));
   await assert.rejects(shareSource('https://example.test',source),/identity mismatch/);
 });
 
-test('already-written is idempotent for the helper without a second upload',async t=>{
+test('already-written at challenge is idempotent for the helper without a PUT',async t=>{
   let calls=0;
-  t.mock.method(globalThis,'fetch',async()=>{calls++;return Response.json({error:'already_written'},{status:409});});
-  assert.equal(await shareSource('https://example.test','x'),address('x')); assert.equal(calls,1);
+  t.mock.method(globalThis,'fetch',async url=>{calls++;return url.pathname==='/b'?needWork():Response.json({error:'already_written'},{status:409});});
+  assert.equal(await shareSource('https://example.test','x'),address('x')); assert.equal(calls,2);
 });
 
 test('untrusted challenge parameters, excessive work and cancellation are bounded',async t=>{
-  t.mock.method(globalThis,'fetch',async()=>Response.json(ticket(address('other'))));
+  t.mock.method(globalThis,'fetch',async url=>url.pathname==='/b'?needWork():Response.json(ticket(address('other'))));
   await assert.rejects(shareSource('https://example.test','x'),/Challenge address/);
   await assert.rejects(solveChallenge({...ticket(address('x')),target:'0'.repeat(64)},{maxTrials:1}),/No solution/);
   await assert.rejects(solveChallenge({...ticket(address('x')),expires_at_ms:1}),/expired/);
@@ -58,7 +76,8 @@ test('untrusted challenge parameters, excessive work and cancellation are bounde
 
 test('mutable caller buffers are copied before asynchronous upload work',async t=>{
   const bytes=new Uint8Array([65]), a=address(bytes);
-  t.mock.method(globalThis,'fetch',async(_,options)=>{
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    if(url.pathname==='/b')return needWork();
     if(options.method==='POST'){bytes[0]=66;return Response.json(ticket(a));}
     assert.deepEqual(options.body,new Uint8Array([65]));
     return Response.json({address:a,digest:digest('A'),bytes:1});
@@ -69,4 +88,13 @@ test('mutable caller buffers are copied before asynchronous upload work',async t
 test('browser helper exposes friendly server guidance as text',async t=>{
   t.mock.method(globalThis,'fetch',async()=>Response.json({message:'Request a fresh challenge and solve it locally.'},{status:409}));
   await assert.rejects(shareSource('https://example.test','x'),/Upload failed \(409\): Request a fresh challenge/);
+});
+
+test('direct failures do not cause challenge fallback or upload retries',async t=>{
+  for(const response of [Response.json({error:'growth_limit'},{status:429}),Response.json({error:'other'},{status:428}),Response.json({error:'service_unavailable'},{status:503})]){
+    const mock=t.mock.method(globalThis,'fetch',async()=>response);
+    await assert.rejects(shareSource('https://example.test','x'),/Upload failed/);
+    assert.equal(mock.mock.callCount(),1);
+    mock.mock.restore();
+  }
 });

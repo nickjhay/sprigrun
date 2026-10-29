@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { config, type Config } from './config.ts';
 import { checkUploadHeaders, objectKey, readBounded, verifiedBody } from './bytes.ts';
-import { parseAddress, TICKET_ID, NONCE } from './proof.ts';
+import { parseAddress, proofPrefix, TICKET_ID, NONCE } from './proof.ts';
 import { failure, HttpError, type Env, type Failure } from './types.ts';
 
 export { StoreCoordinator } from './coordinator.ts';
@@ -94,7 +94,8 @@ async function route(request: Request, env: Env, ctx: ExecutionContext, url: URL
   const blob = parseAddress(address);
   const challengeAddress = url.pathname.startsWith('/challenge/b/') ? url.pathname.slice(13) : '';
   const challenge = parseAddress(challengeAddress);
-  if (url.pathname !== '/' && !blob && !challenge) throw new HttpError(404, 'not_found');
+  const collection = url.pathname === '/b';
+  if (url.pathname !== '/' && !blob && !challenge && !collection) throw new HttpError(404, 'not_found');
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: {
       'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, OPTIONS',
@@ -116,9 +117,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext, url: URL
     return response;
   }
   if (blob && ['GET', 'HEAD'].includes(request.method)) return getBlob(request, env, address, policy);
-  if ((challenge && request.method === 'POST') || (blob && request.method === 'PUT')) {
+  if (((challenge || collection) && request.method === 'POST') || (blob && request.method === 'PUT')) {
     if (request.headers.has('Authorization')) throw new HttpError(400, 'upload_authorization_not_supported');
-    const size = (challenge ?? blob)!.bytes;
+    const size = collection ? policy.maxBytes : (challenge ?? blob)!.bytes;
     if (size > policy.maxBytes) throw new HttpError(413, 'blob_too_large');
     checkUploadHeaders(request, challenge ? 0 : size);
     // Approximate edge limit; the DO separately enforces exact global budgets.
@@ -127,9 +128,21 @@ async function route(request: Request, env: Env, ctx: ExecutionContext, url: URL
       if (!(await env.UPLOAD_RATE_LIMITER.limit({ key: ip })).success) throw new HttpError(429, 'client_attempt_limit', 60);
     }
     const store = coordinator(env);
+    if (collection) {
+      if (request.headers.has('Blob-Ticket') || request.headers.has('Blob-Nonce')) throw new HttpError(400, 'use_addressed_put_for_proof');
+      const admission = await store.admitOpenUpload();
+      if (!admission.ok) return failed(admission);
+      const bytes = await readBounded(request, size, policy.uploadTimeoutMs);
+      const result = await store.publish(null, bytes);
+      if (!result.ok) return failed(result);
+      const address = `${result.value.digest}_${result.value.bytes}`;
+      const path = `/b/${address}`;
+      return json({ address, digest: result.value.digest, bytes: result.value.bytes, url: path,
+        submitted_at_ms: result.value.submitted_at_ms }, result.value.created ? 201 : 200, { Location: path });
+    }
     if (challenge) {
       const result = await store.challenge(challengeAddress);
-      return result.ok ? json(result.value, 201) : failed(result);
+      return result.ok ? json({ ...result.value, message_prefix: proofPrefix(result.value) }, 201) : failed(result);
     }
     const id = request.headers.get('Blob-Ticket') ?? '';
     const nonce = request.headers.get('Blob-Nonce') ?? '';
@@ -143,9 +156,10 @@ async function route(request: Request, env: Env, ctx: ExecutionContext, url: URL
     const result = await store.publish(address, bytes);
     if (!result.ok) return failed(result);
     const path = `/b/${address}`;
-    return json({ address, digest: result.value.digest, bytes: result.value.bytes, url: path }, 201, { Location: path });
+    return json({ address, digest: result.value.digest, bytes: result.value.bytes, url: path,
+      submitted_at_ms: result.value.submitted_at_ms }, 201, { Location: path });
   }
-  return json({ error: 'method_not_allowed' }, 405, { Allow: challenge ? 'POST, OPTIONS' : blob ? 'GET, HEAD, PUT, OPTIONS' : 'GET, HEAD, OPTIONS' });
+  return json({ error: 'method_not_allowed' }, 405, { Allow: challenge || collection ? 'POST, OPTIONS' : blob ? 'GET, HEAD, PUT, OPTIONS' : 'GET, HEAD, OPTIONS' });
 }
 
 export default {

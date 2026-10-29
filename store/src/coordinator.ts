@@ -25,6 +25,7 @@ interface Receipt extends Record<string, SqlStorageValue> {
   status: 'pending' | 'stored' | 'blocked';
   bytes: number;
   debit: number;
+  submitted_at_ms: number | null;
 }
 interface TicketRow extends Record<string, SqlStorageValue> { id: string; expires: number; value: string }
 
@@ -43,8 +44,14 @@ export class StoreCoordinator extends DurableObject<Env> {
     // tombstones; an existing v0.4 deployment needs an explicit offline migration.
     if (old && JSON.parse(old.value).schema !== 2) throw new Error('address_schema_changed_use_fresh_v05_instance');
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS receipts (
-      address TEXT PRIMARY KEY, status TEXT NOT NULL, bytes INTEGER NOT NULL, debit INTEGER NOT NULL
+      address TEXT PRIMARY KEY, status TEXT NOT NULL, bytes INTEGER NOT NULL, debit INTEGER NOT NULL,
+      submitted_at_ms INTEGER
     )`);
+    // Old v0.5 receipts have no historical timestamp. Preserve that as unknown;
+    // never invent one from the upgrade/retry time or reset their quota/block state.
+    if (!ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(receipts)').toArray().some(column => column.name === 'submitted_at_ms')) {
+      ctx.storage.sql.exec('ALTER TABLE receipts ADD COLUMN submitted_at_ms INTEGER');
+    }
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS tickets (
       id TEXT PRIMARY KEY, expires INTEGER NOT NULL, value TEXT NOT NULL
     )`);
@@ -170,28 +177,64 @@ export class StoreCoordinator extends DurableObject<Env> {
     });
   }
 
-  // Trusted internal RPC: the HTTP Worker calls this only after redeem succeeds.
-  async publish(address: string, input: Uint8Array): Promise<Result<Published>> {
-    const parsed = parseAddress(address);
-    if (!parsed) return failure(400, 'invalid_address');
-    if (input.byteLength > this.policy.maxBytes) return failure(413, 'blob_too_large');
-    if (input.byteLength !== parsed.bytes) return failure(422, 'length_mismatch');
-    if (await sha256(input) !== parsed.digest) return failure(422, 'digest_mismatch');
-    try { validate(input, this.policy.validationPolicy); }
-    catch (error) {
-      if (error instanceof HttpError) return failure(error.status, error.code);
-      throw error;
-    }
+  private workRequired(state: Control) {
+    if ((state.proofOfWorkBits ?? this.policy.proofOfWorkBits) === 0 &&
+        (state.proofOfWorkPerByte ?? this.policy.proofOfWorkPerByte) === 0) return null;
+    return {
+      ...failure(428, 'proof_required'),
+      message: 'Proof of work is enabled. Compute SHA-256 (lowercase hex) and the byte length of your exact file. POST /challenge/b/<hash>_<length> with no body. Hash the returned message_prefix followed by a 16-digit lowercase hex nonce and a newline until the digest is at most target. PUT the unchanged file to /b/<hash>_<length> with Blob-Ticket: <id> and Blob-Nonce: <nonce>. Solve locally; do not send trial nonces to the server.',
+    };
+  }
+
+  /** No ticket when work is off. Still debit the global body-attempt allowance. */
+  async admitOpenUpload(): Promise<Result<null>> {
     return this.exclusive(async () => {
+      const state = this.read();
+      this.refresh(state);
+      if (state.paused) return failure(503, 'uploads_paused', 60);
+      if (state.attempts.tokens < 1) return failure(429, 'attempt_limit', waitSeconds(state.attempts, this.policy.attempts, 1));
+      state.attempts.tokens--;
+      this.save(state);
+      await this.ctx.storage.sync();
+      return this.workRequired(state) ?? { ok: true, value: null };
+    });
+  }
+
+  // Trusted internal RPC: HTTP calls only after redeem/admitOpenUpload succeeds.
+  // A null address asks us to compute it; it never bypasses an enabled PoW policy.
+  async publish(address: string | null, input: Uint8Array): Promise<Result<Published>> {
+    const openUpload = address === null;
+    if (input.byteLength > this.policy.maxBytes) return failure(413, 'blob_too_large');
+    if (address !== null && !parseAddress(address)) return failure(400, 'invalid_address');
+    const digest = await sha256(input);
+    address ??= `${digest}_${input.byteLength}`;
+    const parsed = parseAddress(address)!;
+    if (input.byteLength !== parsed.bytes) return failure(422, 'length_mismatch');
+    if (digest !== parsed.digest) return failure(422, 'digest_mismatch');
+    return this.exclusive<Published>(async () => {
+      const state = this.read();
+      if (state.paused) return failure(503, 'uploads_paused', 60);
+      // Policy may have changed while reading the body. Existing issued tickets
+      // keep their own target, but unticketed uploads must still have work off.
+      const required = openUpload && this.workRequired(state);
+      if (required) return required;
+      const prior = this.receipt(address);
+      if (prior?.status === 'blocked') return failure(410, 'blob_blocked');
+      if (prior?.status === 'stored') {
+        if (!openUpload) return failure(409, 'already_written');
+        // A successful idempotent POST promises actual bytes, not just a receipt.
+        // Do not silently recreate an externally removed object.
+        const existing = await this.env.BLOBS.get(objectKey(address));
+        if (!existing) throw new Error('stored_blob_missing');
+        await verifiedBody(existing, parsed.digest, parsed.bytes);
+        if (prior.submitted_at_ms !== null && existing.customMetadata?.submitted_at_ms !== String(prior.submitted_at_ms)) throw new Error('stored_submission_time_mismatch');
+        return { ok: true, value: { digest: parsed.digest, bytes: input.length, created: false, submitted_at_ms: prior.submitted_at_ms } };
+      }
+      validate(input, this.policy.validationPolicy);
       const reservation = this.ctx.storage.transactionSync((): Result<null> => {
-        const state = this.read();
-        if (state.paused) return failure(503, 'uploads_paused', 60);
-        const existing = this.receipt(address);
-        if (existing?.status === 'blocked') return failure(410, 'blob_blocked');
-        if (existing?.status === 'stored') return failure(409, 'already_written');
-        if (existing) {
-          if (existing.bytes !== input.length) throw new Error('receipt_integrity_failure');
-          return { ok: true, value: null }; // Retry ambiguous R2 write, with fresh PoW.
+        if (prior) {
+          if (prior.bytes !== input.length) throw new Error('receipt_integrity_failure');
+          return { ok: true, value: null }; // Retry ambiguous R2 write with new admission.
         }
         this.refresh(state);
         const debit = Math.max(input.length, this.policy.minimumDebit);
@@ -200,23 +243,27 @@ export class StoreCoordinator extends DurableObject<Env> {
         state.long.tokens -= debit; state.burst.tokens -= debit;
         state.reservedBlobs++; state.reservedBytes += debit;
         this.save(state);
-        this.ctx.storage.sql.exec('INSERT INTO receipts (address, status, bytes, debit) VALUES (?, ?, ?, ?)', address, 'pending', input.length, debit);
+        this.ctx.storage.sql.exec('INSERT INTO receipts (address, status, bytes, debit, submitted_at_ms) VALUES (?, ?, ?, ?, ?)',
+          address, 'pending', input.length, debit, Date.now());
         return { ok: true, value: null };
       });
       if (!reservation.ok) return reservation;
       await this.ctx.storage.sync();
+      const submittedAt = this.receipt(address)!.submitted_at_ms;
+      const timestamp: Record<string, string> = submittedAt === null ? {} : { submitted_at_ms: String(submittedAt) };
       const key = objectKey(address);
       // Most publications are new: the conditional PUT itself establishes absence.
       // Read only to reconcile an existing object after an ambiguous earlier write.
       const written = await this.env.BLOBS.put(key, input, {
         onlyIf: new Headers({ 'If-None-Match': '*' }), sha256: parsed.digest,
         httpMetadata: { contentType: 'text/plain; charset=utf-8' },
-        customMetadata: { kind: 'blob', sha256: parsed.digest, validation_policy: this.policy.validationPolicy },
+        customMetadata: { kind: 'blob', sha256: parsed.digest, validation_policy: this.policy.validationPolicy, ...timestamp },
       });
       if (!written) {
         const existing = await this.env.BLOBS.get(key);
         if (!existing) throw new Error('conditional_write_lost');
         await verifiedBody(existing, parsed.digest, parsed.bytes);
+        if (submittedAt !== null && existing.customMetadata?.submitted_at_ms !== String(submittedAt)) throw new Error('stored_submission_time_mismatch');
       }
       this.ctx.storage.transactionSync(() => {
         if (this.receipt(address)!.status === 'pending') {
@@ -225,7 +272,7 @@ export class StoreCoordinator extends DurableObject<Env> {
           this.ctx.storage.sql.exec('UPDATE receipts SET status = ? WHERE address = ?', 'stored', address);
         }
       });
-      return { ok: true, value: { digest: parsed.digest, bytes: input.length, created: true } };
+      return { ok: true, value: { digest: parsed.digest, bytes: input.length, created: true, submitted_at_ms: submittedAt } };
     });
   }
 
@@ -242,7 +289,9 @@ export class StoreCoordinator extends DurableObject<Env> {
           ON CONFLICT(address) DO UPDATE SET status = 'blocked'`, address);
       });
       await this.ctx.storage.sync();
-      await this.env.BLOBS.put(objectKey(address), crypto.getRandomValues(new Uint8Array(32)), { customMetadata: { kind: 'blocked' } });
+      const submittedAt = this.receipt(address)!.submitted_at_ms;
+      const timestamp: Record<string, string> = submittedAt === null ? {} : { submitted_at_ms: String(submittedAt) };
+      await this.env.BLOBS.put(objectKey(address), crypto.getRandomValues(new Uint8Array(32)), { customMetadata: { kind: 'blocked', ...timestamp } });
       return { ok: true, value: null };
     });
   }

@@ -45,6 +45,19 @@ export async function shareSourceBytes(origin: string, input: Uint8Array, option
   new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   const digest = await hash(bytes);
   const address = `${digest}_${bytes.length}`;
+  const checkPublished = (result: Record<string, unknown>) => {
+    if (result.address !== address || result.digest !== digest || result.bytes !== bytes.length) throw new Error('Upload identity mismatch');
+    return address;
+  };
+  // The common, no-work case is one request. Only an explicit work requirement
+  // starts the challenge flow; network/server failures never cause an auto-retry.
+  const direct = await fetch(new URL('/b', origin), {
+    method: 'POST', body: bytes, headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    credentials: 'omit', redirect: 'error', signal: deadline(options.signal),
+  });
+  const directResult = await responseJson(direct);
+  if (direct.ok) return checkPublished(directResult);
+  if (direct.status !== 428 || directResult.error !== 'proof_required') problem(direct, directResult);
   const issued = await fetch(new URL(`/challenge/b/${address}`, origin), {
     method: 'POST', credentials: 'omit', redirect: 'error', signal: deadline(options.signal),
   });
@@ -60,8 +73,7 @@ export async function shareSourceBytes(origin: string, input: Uint8Array, option
   const result = await responseJson(response);
   if (response.status === 409 && result?.error === 'already_written') return address;
   if (!response.ok) problem(response, result);
-  if (result?.address !== address || result.digest !== digest || result.bytes !== bytes.length) throw new Error('Upload identity mismatch');
-  return address;
+  return checkPublished(result);
 }
 
 export async function loadSource(origin: string, address: string, signal?: AbortSignal): Promise<{ bytes: Uint8Array; source: string }> {

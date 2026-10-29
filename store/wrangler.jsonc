@@ -34,8 +34,8 @@
     "CHALLENGE_TTL_SECONDS": "600",
     "UPLOAD_TIMEOUT_MS": "10000",
     "VALIDATION_POLICY": "utf8-v1",
-    // Expected work = 2^BITS + source_bytes * PER_BYTE. 0,0 means one trial.
-    // Tickets remain single-use even when work is trivial. Overrides persist.
+    // Expected work = 2^BITS + source_bytes * PER_BYTE. 0,0 allows direct POST /b.
+    // Addressed PUT still uses single-use tickets. Live overrides persist.
     "PROOF_OF_WORK_BITS": "0",
     "PROOF_OF_WORK_PER_BYTE": "0",
     "BROWSER_CACHE_SECONDS": "31536000",

@@ -59,7 +59,8 @@ can be pure and correct while a reordered await still breaks the protocol.
 | --- | --- | --- |
 | **B1: exact bounded bytes.** Accept only canonical `hash_length`; count actual bytes, check digest and configured encoding, never normalize or execute source. | `store/src/bytes.ts`, `proof.ts`, `config.ts`; `coordinator.publish` | Unit tests cover malformed UTF-8, BOM/NUL/CRLF, reused buffers, oversized/stalled streams. Integration tests cover wrong digest/length and corrupt stored bodies. Headers are not evidence of actual size. |
 | **B2: successful reads are verified.** GET, HEAD and 304 must first establish present, allowed bytes with the requested digest/length. | `store/src/index.ts:getBlob`, `bytes.ts:verifiedBody` | Corruption, false format labels, missing objects and blocks cannot become conditional successes. One R2 GET; no shared source cache. A provider/Worker compromise can deny service; a verifying client still rejects substituted bytes. |
-| **A1: one ticket authorizes at most one body attempt.** Scope and target come from bounded server state; deletion is durable before body admission. | `coordinator.challenge/redeem`, HTTP routing, `proof.ts`, `shared/work.ts` | Concurrent solutions, expiry, wrong address, bad body, failed upload and restart tests. An invalid proof consumes attempt credit but does not consume the ticket. A valid proof remains spent on later failure. Internal `publish` is a trusted capability, not independently proof-authenticated. |
+| **A0: ticket-free admission requires work off.** An exact global attempt debit is durable before reading a bounded body; publication rechecks live work policy and pause. | `coordinator.admitOpenUpload/publish`, HTTP `POST /b` | Tests cover both work parameters, pause/attempt rejection before body pulls, policy changes during streaming, invalid bodies, concurrency and blocks. This path creates no tickets. Internal `publish` remains a trusted capability. |
+| **A1: one ticket authorizes at most one body attempt.** Scope and target come from bounded server state; deletion is durable before body admission. | `coordinator.challenge/redeem`, HTTP routing, `proof.ts`, `shared/work.ts` | Concurrent solutions, expiry, wrong address, bad body, failed upload and restart tests. An invalid proof consumes attempt credit but does not consume the ticket. A valid proof remains spent on later failure. |
 | **Q1: one new address reserves once.** Both buckets and its pending receipt commit together before any R2 publication. | `shared/bucket.ts`, `coordinator.publish` | Integer refill/property tests, concurrent quota tests, before/after-write faults and restart tests. Empty/tiny objects pay the minimum debit. Pending retries reuse the reservation; ambiguous writes are not automatically refunded. |
 | **P1: publication cannot overwrite existing content or a block.** Reserve durably, conditionally create, verify an existing object, then confirm. | `coordinator.publish`, `exclusive` | Duplicate/concurrent uploads, corrupt object and tombstone tests. R2 and SQLite do not share a transaction. A failure may leave an unused reservation or readable bytes before HTTP success; clients must tolerate ambiguous completion. |
 | **S1: suppression wins against concurrent publication.** Record permanent refusal, durably flush it, replace the object with a fresh tombstone, then report success. | `coordinator.block`, shared mutation lock, admin authentication | Block races, empty blobs, stale conditional writes, block failure/retry and restart tests. Until a failed tombstone write is retried, old bytes can remain readable. Success does not stop an already-running response or browser copy. |
@@ -96,11 +97,18 @@ therefore part of operations, not another method behind that same lock.
 
 ## Data and history loss
 
-**Current gap:** receipts contain address, status, bytes and debit, but no
-authoritative per-object admission sequence/time. R2 has an upload timestamp;
-it is neither a service-order journal nor naming acceptance time, and overwrites
-change it. The naming demo accepts caller-supplied stamps in memory. Nothing in
-the first deployment should advertise durable submission chronology yet.
+New receipts include `submitted_at_ms`, Unix epoch milliseconds assigned once in
+the first quota-reservation transaction for validated bytes. The exact value is
+copied to R2 custom metadata (decimal string), retained by pending repair,
+duplicate POST, restart and block/tombstone operations, and returned on success.
+A v0.5 schema upgrade adds a nullable column without fabricating missing history.
+Tests cover failures on both sides of the R2 write, restart, duplicates, metadata
+corruption and migration with preserved quota/block state. R2's own upload time
+does not substitute for this original fact. These are trusted host timestamps,
+not cryptographic attestations or a total order; the store has no sequence.
+
+**Remaining gap:** naming acceptance/order is still an in-memory experiment.
+Each service owns its own admission facts; object upload can precede acceptance.
 
 Before hosting names, persist at least: service identity/epoch, record address,
 original admission sequence and time, applicable policy, and the state needed
@@ -118,9 +126,9 @@ forward clock jump expiring recovery windows: clock anomaly handling is still a
 hosted-service design task. Quota refill also uses the service clock: a forward
 jump can refill credit up to its cap; a backward jump cannot mint credit. Claims
 about refill over real elapsed time assume a trustworthy clock. Missing ancestors or admission facts must yield
-incomplete/unavailable, not a plausible newly invented ordering. If we want blob
-submission chronology as well, add its journal before making that promise;
-historical facts absent from the old schema cannot be backfilled truthfully.
+incomplete/unavailable, not a plausible newly invented ordering. Historical facts
+absent from the old schema cannot be backfilled truthfully. Quota counters remain
+authoritative: live R2 objects alone omit pending reservations and suppressed bytes.
 
 Recovery must include the control plane as well as R2 objects:
 
