@@ -255,3 +255,11 @@ daily counter. Changing these settings changes the derived window bounds.
 These are not calendar-day resets. Existing credit is retained when settings change; existing
 reservations keep their original debit. Raising the floor does not retroactively
 charge old digests. The configuration change does not itself deploy anything.
+
+## October 29 operation-count refinement
+
+The new-object path now attempts its conditional R2 PUT without a preliminary
+GET. A failed absence condition is followed by a verified GET for reconciliation.
+The model still conservatively budgets one read per new upload; those figures
+are an allowance for retries rather than the common-path request count. Pricing
+inputs remain the October 27 snapshot.

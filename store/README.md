@@ -345,3 +345,12 @@ dry run. `test/worker.ts` contains fault/probe controls only; Wrangler deploys
 `src/index.ts`, which exposes none of them. Python tests cover pricing arithmetic,
 billing units, quota bounds and challenge traffic. No cloud deployment is tested
 or performed by those commands.
+
+## Repository integration
+
+The workbench and service use the same client and proof definitions. Pure quota
+and work-target helpers live in `../shared/`; build from this repository with that
+directory present. [SERVICES.md](../SERVICES.md) records the latest review and
+future naming composition. Ordinary blobs already have no automatic expiration.
+A new publication now uses one conditional R2 PUT; only reconciliation of an
+existing object requires a GET. The public upload protocol is unchanged.

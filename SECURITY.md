@@ -16,7 +16,7 @@ The content loader accepts canonical addresses only. It captures one selected st
 
 The pinned v0.5 publisher validates challenge identity, limits each HTTP request to 15 seconds, response JSON to 4 KiB and solving to one million trials/30 seconds. A 65-second worker deadline bounds the complete publish attempt. It publishes a frozen revision; edits during publishing do not change those bytes. Cancellation may happen after a server commit, so the UI explains that a blob might already exist. There is no automatic retry loop or retention promise.
 
-The production store source is unchanged. The local launcher uses local R2 and SQLite only, retains its global quotas and proof flow, and seeds only its own local instance. The optional Cloudflare per-IP rate-limit binding is not simulated. Local persistence is excluded from packaged files and version control.
+The production store source lives in this repository; its latest simplification review is in [SERVICES.md](SERVICES.md). The local launcher uses local R2 and SQLite only, retains its global quotas and proof flow, and seeds only its own local instance. The optional Cloudflare per-IP rate-limit binding is not simulated. Local persistence is excluded from packaged files and version control.
 
 ## Execution and terminal I/O
 

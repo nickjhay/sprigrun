@@ -1,4 +1,4 @@
-import { shareSource } from '../vendor/blob-store/examples/client.ts';
+import { shareSource } from '../store/examples/client.ts';
 import { demoSources } from '../src/examples.ts';
 import { storeOrigin } from '../src/document.ts';
 import { resolve } from 'node:path';

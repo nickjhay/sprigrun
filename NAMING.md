@@ -6,6 +6,11 @@ signed updates, stronger-key recovery, and service arrival order with a bounded
 recovery window. The text encoding, stronger-prefix restriction and exact deadline
 boundary below are concrete draft choices made to exercise that direction.
 
+**October 29 hosted-service direction:** [SERVICES.md](SERVICES.md) records the
+one-step bytes-to-store-and-name endpoint, one selected head plus admission
+metadata, a service-configured recovery duration, and default no-expiry blob
+retention. These are design decisions; the code below remains an offline model.
+
 ## Objects and identities
 
 - **C:** the content blob's `sha256_length`. Source bytes remain untouched.

@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { config, type Config } from './config.ts';
-import { full, refill, waitSeconds, type BucketState } from './bucket.ts';
+import { full, refill, waitSeconds, type BucketState } from '../../shared/bucket.ts';
 import { objectKey, sha256, validate, verifiedBody } from './bytes.ts';
 import { NONCE, PROTOCOL, TICKET_ID, parseAddress, proofDigest, proofPrefix, workTarget, type Challenge } from './proof.ts';
 import { failure, HttpError, type Env, type Published, type Result } from './types.ts';
@@ -206,19 +206,17 @@ export class StoreCoordinator extends DurableObject<Env> {
       if (!reservation.ok) return reservation;
       await this.ctx.storage.sync();
       const key = objectKey(address);
-      const existing = await this.env.BLOBS.get(key);
-      if (existing) await verifiedBody(existing, parsed.digest, parsed.bytes);
-      else {
-        const written = await this.env.BLOBS.put(key, input, {
-          onlyIf: new Headers({ 'If-None-Match': '*' }), sha256: parsed.digest,
-          httpMetadata: { contentType: 'text/plain; charset=utf-8' },
-          customMetadata: { kind: 'blob', sha256: parsed.digest, validation_policy: this.policy.validationPolicy },
-        });
-        if (!written) {
-          const raced = await this.env.BLOBS.get(key);
-          if (!raced) throw new Error('conditional_write_lost');
-          await verifiedBody(raced, parsed.digest, parsed.bytes);
-        }
+      // Most publications are new: the conditional PUT itself establishes absence.
+      // Read only to reconcile an existing object after an ambiguous earlier write.
+      const written = await this.env.BLOBS.put(key, input, {
+        onlyIf: new Headers({ 'If-None-Match': '*' }), sha256: parsed.digest,
+        httpMetadata: { contentType: 'text/plain; charset=utf-8' },
+        customMetadata: { kind: 'blob', sha256: parsed.digest, validation_policy: this.policy.validationPolicy },
+      });
+      if (!written) {
+        const existing = await this.env.BLOBS.get(key);
+        if (!existing) throw new Error('conditional_write_lost');
+        await verifiedBody(existing, parsed.digest, parsed.bytes);
       }
       this.ctx.storage.transactionSync(() => {
         if (this.receipt(address)!.status === 'pending') {

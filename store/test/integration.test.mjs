@@ -108,6 +108,38 @@ test('simultaneous duplicate uploads create one receipt and one quota debit', as
   assert.equal(state.confirmed_unblocked_bytes, 4);
 });
 
+test('new uploads need one R2 write; ambiguous retries verify the existing object', async t => {
+  const mf = use(t);
+  const calls = async () => (await request(mf, '/__test/storage-calls')).json();
+  assert.equal((await upload(mf, 'new')).status, 201);
+  assert.deepEqual(await calls(), { gets: 0, puts: 1 });
+  assert.equal((await upload(mf, 'new')).status, 409);
+  assert.deepEqual(await calls(), { gets: 0, puts: 1 });
+  await request(mf, '/__test/fault/after-write');
+  assert.equal((await upload(mf, 'retry')).status, 503);
+  assert.deepEqual(await calls(), { gets: 0, puts: 2 });
+  assert.equal((await upload(mf, 'retry')).status, 201);
+  assert.deepEqual(await calls(), { gets: 1, puts: 3 });
+  assert.equal((await stats(mf)).reserved_debit_bytes_total, 128);
+  assert.equal(await (await request(mf, `/b/${hash('retry')}`)).text(), 'retry');
+});
+
+test('conditional publication never overwrites an existing tombstone or corrupt object', async t => {
+  const mf = use(t), bucket = await mf.getR2Bucket('BLOBS');
+  for (const [source, bytes, metadata, status] of [
+    ['blocked', 'tombstone', { kind: 'blocked' }, 410],
+    ['valid', 'wrong', { kind: 'blob', validation_policy: 'utf8-v1' }, 503],
+  ]) {
+    const key = `b/${hash(source)}`;
+    await bucket.put(key, bytes, { customMetadata: metadata });
+    assert.equal((await upload(mf, source)).status, status);
+    const stored = await bucket.get(key);
+    assert.equal(await stored.text(), bytes);
+    assert.deepEqual(stored.customMetadata, metadata);
+  }
+  assert.equal((await stats(mf)).confirmed_unblocked_blobs, 0);
+});
+
 test('simultaneous distinct uploads cannot exceed either growth bucket', async t => {
   const mf = use(t);
   const responses = await Promise.all(Array.from({ length: 10 }, (_, i) => upload(mf, `blob ${i}`)));

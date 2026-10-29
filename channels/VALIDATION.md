@@ -6,7 +6,7 @@
 - After tightening alarm scheduling to preserve an existing earlier deadline across requests and cold starts, typechecking, the two alarm/hibernation tests, and the production build passed again.
 - `wrangler deploy --dry-run` passed for the channel Worker and declared bindings. No deployment command was executed without `--dry-run`.
 - Native CLI smoke passed through the actual local Worker: key file creation, channel creation, posting from stdin, and history retrieval.
-- The original archive's `store/` and `vendor/` files were compared byte-for-byte and are unchanged.
+- At the original archive checkpoint, `store/` and `vendor/` were compared byte-for-byte. The subsequent [service review](../SERVICES.md) removes the duplicate vendor client and consolidates quota/work arithmetic; root CI now also runs the full store suite.
 - Tests use no production account or remote resource bindings. Temporary keys/state are not in the archive.
 
 Channel coverage includes exact raw-key hashing, canonical cursors, secret verification, nontrivial proof solving, ticket scope and single use, malformed UTF-8, digest/length mismatch, oversized bodies, retained duplicate recovery, concurrent ordering, byte/count/age trimming, gap reporting, encoded JSON bounds, persistence across restart, channel incarnation replacement, capacity/quota rejection, two live subscribers, ACK backpressure, server-initiated close deadlines, and forced hibernation with an outstanding receipt.

@@ -2,7 +2,7 @@ import test from 'node:test';
 import { createHash } from 'node:crypto';
 import { parseAddress, proofDigest, workTarget } from '../src/proof.ts';
 import assert from 'node:assert/strict';
-import { full, refill, waitSeconds } from '../src/bucket.ts';
+import { full, refill, waitSeconds } from '../../shared/bucket.ts';
 import { config } from '../src/config.ts';
 import { sha256, validate, readBounded, checkUploadHeaders } from '../src/bytes.ts';
 

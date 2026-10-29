@@ -1,5 +1,5 @@
 /** Offline naming experiment. See NAMING.md before using this as a protocol. */
-import { parseAddress } from '../../vendor/blob-store/src/proof.ts';
+import { parseAddress } from '../../store/src/proof.ts';
 
 export const NAME_PROTOCOL = 'sprig-name-draft-2';
 export const NAME_LIMITS = Object.freeze({ recordBytes: 8192, keys: 8, nodes: 256 });

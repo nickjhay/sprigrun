@@ -4,6 +4,12 @@
 a plan, with the offline naming experiment identified below as implemented. It
 does not promise new hosted endpoints, a Sprig WASM release, or permanent storage.
 
+October 29 update: [SERVICES.md](SERVICES.md) records the service-wide review and
+latest decisions. The naming endpoint accepts bytes and composes idempotent blob
+storage with name acceptance in one publishing request. Keep one selected head
+plus per-record acceptance facts, a service policy constant for recovery, and
+no automatic expiry for ordinary blobs. Channels keep their separate retention.
+
 ## Keep the foundations small
 
 | Primitive | Contract |
@@ -53,7 +59,7 @@ Next steps before exposing names as a service:
 1. Choose the deployed recovery duration and admission policy. The replay now
    exercises first-arrival ties and time-limited historical override, including
    retired keys and deadline boundaries. It has no production timing guarantee.
-2. Specify service acceptance receipts, revision lookup, lease expiry and restart
+2. Specify service acceptance metadata, revision lookup, retention and restart
    behavior. Stronger-key recovery can change selected ancestry; old revision
    labels must not silently acquire new meanings.
 3. Add bounded admission, persistence, parent retrieval and HTTP read/update APIs.

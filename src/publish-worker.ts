@@ -1,4 +1,4 @@
-import { shareSourceBytes } from '../vendor/blob-store/examples/client.ts';
+import { shareSourceBytes } from '../store/examples/client.ts';
 const scope=self as unknown as DedicatedWorkerGlobalScope;
 let started=false;
 scope.onmessage=async({data})=>{
