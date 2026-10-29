@@ -32,7 +32,11 @@ export async function buildWorkbench({ directory = 'dist', origin, channelOrigin
   const main = await build({ entryPoints:['src/main.ts'], outdir:directory+'/assets', entryNames:'[name]-[hash]', bundle:true, format:'esm', platform:'browser', target:'es2023', metafile:true, define:{ __BUILD__:JSON.stringify(settings) } });
   const js = outputFor(main.metafile,'src/main.ts');
   const css = '/' + Object.keys(main.metafile.outputs).find(p=>p.endsWith('.css')).slice(directory.length+1);
-  const html = (await readFile('index.html','utf8')).replace('<!-- BUILD_ASSETS -->',`<link rel="stylesheet" href="${css}"><script type="module" src="${js}"></script>`);
+  // Publish the guide link in the HTML itself, including for local HTTP readers.
+  const helpURL = new URL('/help', config.storeOrigin || 'https://store.sprig.run').href.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
+  const html = (await readFile('index.html','utf8'))
+    .replace('href="https://store.sprig.run/help"', `href="${helpURL}"`)
+    .replace('<!-- BUILD_ASSETS -->',`<link rel="stylesheet" href="${css}"><script type="module" src="${js}"></script>`);
   await writeFile(directory+'/index.html',html);
   const channel = await build({ entryPoints:['src/channel-main.ts'], outdir:directory+'/assets', entryNames:'[name]-[hash]', bundle:true, format:'esm', platform:'browser', target:'es2023', metafile:true, define:{ __BUILD__:JSON.stringify(settings) } });
   const channelJs = outputFor(channel.metafile,'src/channel-main.ts');

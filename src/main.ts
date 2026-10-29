@@ -99,6 +99,7 @@ function configureStore(value:string,persist=true):void {
   if(persist)try{localStorage.setItem(STORE,origin);}catch{/* Current session still works. */}
   element('connection-state').textContent='SET';
   const stats=element<HTMLAnchorElement>('store-stats');stats.href=origin+'/';stats.hidden=false;
+  element<HTMLAnchorElement>('store-help').href=origin+'/help';
   updateButtons();
 }
 async function openShared(address:string):Promise<void> {
