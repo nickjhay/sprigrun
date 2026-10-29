@@ -56,6 +56,9 @@ record count and final checksum. Save that checksum separately in a trusted plac
 and copy the archive outside the account/deletion authority being protected
 against. Protect and verify the destination copy too. File fsync is not a promise
 about the durability of its parent directory or a later backup transfer.
+Record the reviewed CLI/Worker commit alongside the backup. Future schema or
+policy changes need an explicitly tested migration; retain code that can read
+the archive version you actually saved.
 
 Export intentionally **leaves maintenance locked**, even on success. After
 verification/copying, using the returned snapshot ID:

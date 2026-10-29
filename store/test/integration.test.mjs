@@ -897,10 +897,13 @@ test('a lost local store finds the fern, original history, quotas and blocks thr
   assert.ok(!archived.includes(Buffer.from(blocked).toString('base64')));
   assert.equal((await request(source, `/b/${demo.fernProgramAddress}`)).status, 200);
   assert.equal((await post(source, 'new source')).status, 503);
+  // Allocate the empty target while the source still owns its port, so the OS
+  // cannot reuse that origin and trip the CLI's separate-origin guard.
+  target = start({ ...vars, RESTORE_MODE: '1' }, targetDir, true);
+  await target.ready;
   await source.dispose(); source = undefined;
   await rm(sourceDir, { recursive: true, force: true }); // Lose R2 and SQL, not just the process.
 
-  target = start({ ...vars, RESTORE_MODE: '1' }, targetDir, true);
   assert.equal((await request(target, '/')).status, 503);
   assert.equal((await request(target, '/help')).status, 200);
   assert.match((await recoveryCLI(target, 'restore', archive, '--empty-target')).stdout, /"complete":true/);
@@ -974,13 +977,23 @@ test('recovery preserves pending reservations and failed suppression, and resume
   assert.equal(before.reserved_debit_bytes_total, 192); assert.equal(before.confirmed_unblocked_blobs, 0);
   assert.equal((await request(target, `/b/${hash(fixtures[2])}`)).status, 410);
   assert.equal((await admin(target, 'resume')).status, 200);
+  const afterRefill = async text => {
+    let result = await post(target, text);
+    if (result.status === 429) {
+      assert.equal((await result.json()).error, 'attempt_limit');
+      assert.equal(result.headers.get('Retry-After'), '1');
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      result = await post(target, text);
+    }
+    return result;
+  };
   for (const text of fixtures.slice(0, 2)) {
-    const result = await post(target, text); assert.equal(result.status, 201, await result.clone().text());
+    const result = await afterRefill(text); assert.equal(result.status, 201, await result.clone().text());
     assert.equal((await result.json()).submitted_at_ms, saved.records.find(r => r.receipt.address === hash(text)).receipt.submitted_at_ms);
   }
   const after = await stats(target);
   assert.equal(after.reserved_debit_bytes_total, 192); assert.equal(after.confirmed_unblocked_blobs, 2);
-  assert.equal((await post(target, fixtures[2])).status, 410);
+  assert.equal((await afterRefill(fixtures[2])).status, 410);
 });
 
 test('restore refuses nonempty targets, policy mismatches, tampered data and premature completion', async t => {
