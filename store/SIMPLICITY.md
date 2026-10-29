@@ -8,9 +8,13 @@ counter or a spent-ticket history. The nonce never changes the source address.
 There is one new pure TypeScript protocol module and one bounded SQLite table;
 no new Cloudflare service, alarm, timer or external dependency is added.
 
-This release changes addresses to hash_length and requires a fresh deployment
-or a separately planned migration. The historical upgrade notes below apply
-ONLY to their earlier release; they do not describe a v0.5 upgrade.
+The current undeployed revision uses schema 3/archive v2 with no legacy parser.
+One-way reservation/publication/block facts replace mutable status and snapshot
+undo machinery. One short metadata queue owns epochs; R2 preparation/copying stays
+outside it. New uploads still need one R2 PUT; reads add one DO lookup. See
+[CHECKPOINTS.md](CHECKPOINTS.md) and [RECOVERY.md](RECOVERY.md). Reset/reseed only
+disposable earlier local state. The historical upgrade notes below apply ONLY
+to their earlier releases.
 
 ---
 

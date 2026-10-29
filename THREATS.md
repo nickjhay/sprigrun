@@ -38,7 +38,7 @@ storage failures and account compromise, not just hostile network requests.
 We trust the deployed Worker and its bindings, runtime/Web Crypto, Cloudflare's
 storage guarantees, deployment account, and admin credential. A hostile holder of
 deployment or bucket-write authority can bypass application checks. An admin
-token can intentionally destroy served bytes through `block`; its authority is
+token can refuse reads through `block` and delete private payloads through `reclaim`; its authority is
 stronger than pause-only operations. None of our public cryptography prevents
 deletion by those authorities. Credentials for a recovery copy should therefore
 not be available to the ordinary serving Worker or its deploy credential where
@@ -58,12 +58,12 @@ can be pure and correct while a reordered await still breaks the protocol.
 | Invariant | Owner | Evidence and limits |
 | --- | --- | --- |
 | **B1: exact bounded bytes.** Accept only canonical `hash_length`; count actual bytes, check digest and configured encoding, never normalize or execute source. | `store/src/bytes.ts`, `proof.ts`, `config.ts`; `coordinator.publish` | Unit tests cover malformed UTF-8, BOM/NUL/CRLF, reused buffers, oversized/stalled streams. Integration tests cover wrong digest/length and corrupt stored bodies. Headers are not evidence of actual size. |
-| **B2: successful reads are verified.** GET, HEAD and 304 must first establish present, allowed bytes with the requested digest/length. | `store/src/index.ts:getBlob`, `bytes.ts:verifiedBody` | Corruption, false format labels, missing objects and blocks cannot become conditional successes. One R2 GET; no shared source cache. A provider/Worker compromise can deny service; a verifying client still rejects substituted bytes. |
+| **B2: successful reads are verified.** GET, HEAD and 304 must first establish present, allowed bytes with the requested digest/length. | `store/src/index.ts:getBlob`, `bytes.ts:verifiedBody` | Corruption, false format labels, missing objects and blocks cannot become conditional successes. One DO metadata lookup and one R2 GET; no shared source cache. A provider/Worker compromise can deny service; a verifying client still rejects substituted bytes. |
 | **A0: ticket-free admission requires work off.** An exact global attempt debit is durable before reading a bounded body; publication rechecks live work policy and pause. | `coordinator.admitOpenUpload/publish`, HTTP `POST /b` | Tests cover both work parameters, pause/attempt rejection before body pulls, policy changes during streaming, invalid bodies, concurrency and blocks. This path creates no tickets. Internal `publish` remains a trusted capability. |
 | **A1: one ticket authorizes at most one body attempt.** Scope and target come from bounded server state; deletion is durable before body admission. | `coordinator.challenge/redeem`, HTTP routing, `proof.ts`, `shared/work.ts` | Concurrent solutions, expiry, wrong address, bad body, failed upload and restart tests. An invalid proof consumes attempt credit but does not consume the ticket. A valid proof remains spent on later failure. |
 | **Q1: one new address reserves once.** Both buckets and its pending receipt commit together before any R2 publication. | `shared/bucket.ts`, `coordinator.publish` | Integer refill/property tests, concurrent quota tests, before/after-write faults and restart tests. Empty/tiny objects pay the minimum debit. Pending retries reuse the reservation; ambiguous writes are not automatically refunded. |
-| **P1: publication cannot overwrite existing content or a block.** Reserve durably, conditionally create, verify an existing object, then confirm. | `coordinator.publish`, `exclusive` | Duplicate/concurrent uploads, corrupt object and tombstone tests. R2 and SQLite do not share a transaction. A failure may leave an unused reservation or readable bytes before HTTP success; clients must tolerate ambiguous completion. |
-| **S1: suppression wins against concurrent publication.** Record permanent refusal, durably flush it, replace the object with a fresh tombstone, then report success. | `coordinator.block`, shared mutation lock, admin authentication | Block races, empty blobs, stale conditional writes, block failure/retry and restart tests. Until a failed tombstone write is retried, old bytes can remain readable. Success does not stop an already-running response or browser copy. |
+| **P1: publication cannot overwrite existing content or a block.** Reserve durably, conditionally create, verify an existing object, then confirm. | `coordinator.publish`, `exclusive` | Duplicate/concurrent uploads, corruption and held-R2 tests. Private bytes remain invisible until SQL publication. Lost replies still permit ambiguous completion, repaired without another debit. |
+| **S1: suppression wins against concurrent publication.** Commit permanent refusal and flush it without waiting for R2. | `coordinator.block`, shared mutation lock, admin authentication | Block/read/publication races, held preparations, snapshot pins and restart tests. New reads consult SQL first; prior admitted responses and browser copies can remain. Physical reclamation is separate. |
 | **R1: bounded individual work and retained state.** Enforce body size/deadline, ticket cap/expiry, exact global mutation budgets, fixed queue bound and client solve/read limits. | `config.ts`, `bytes.ts`, `coordinator`, browser client | Fault/stream/table-cap tests. These are not a hard bill cap, a bound on every platform buffer, or a fairness guarantee. See amplification risks below. |
 | **H1: history does not change on retry, recovery or restart.** Original admission stamps and policy remain authoritative; current head is derived from them. | Future hosted naming coordinator; current `src/names/replay.ts` is an in-memory model only | Replay tests cover ties, first displaced timestamp, duplicates, exact u64 sequences and key changes. No persistent hosted naming journal or naming recovery implementation exists yet. |
 
@@ -76,36 +76,42 @@ the production bundle: it exposes faults and state probes and must never deploy.
 
 For publication, review every await in this order:
 
-`verify bytes → reserve + pending receipt → flush → conditional R2 write / verify existing → confirm → success`
+`verify bytes → reserve + pending fact → flush → private conditional R2 write / verification → SQL publication → flush → success`
 
 For a proof: `verify stored offer → recheck expiry → delete ticket → flush → admit body`.
-For a block: `record refusal → flush → overwrite with tombstone → success`.
+For a block: `commit refusal fact → flush → success` (no R2 operation).
+For a barrier: `capture maintained totals/policy + seal E + advance E+1 → flush → ACK`.
 
-Receipt progression is absent → pending → stored, with absent/pending/stored →
-blocked as a permanent override. There is no public reverse transition. New
-proofs do not reset receipts. A failed block remains blocked in the coordinator
-and must retry the R2 replacement, even if its SQL state already says blocked.
-An R2 success with a lost confirmation can be reconciled without double charging.
-Ordinary reads can observe R2 bytes before the publication response; this store
-does not promise transactional visibility across SQL and R2.
+Receipts retain at most one reservation, publication and permanent block fact,
+each with its own immutable epoch and time. Blocking overrides visibility. A late
+R2 write can leave private bytes but cannot publish over a block. Unpublished bytes
+return 404. All public GET/HEAD/304 requests consult metadata before R2; failure
+of either authority fails closed. An admitted read may finish after a later block.
 
-The bounded mutation lock must span the R2 write and block. Giving up that lock
-on a timeout while the write can still complete would permit late resurrection.
-The cost is availability: a hung R2 operation can stall all mutations, including
-pause/block, behind the 32-operation queue. The independent route-level stop is
-therefore part of operations, not another method behind that same lock.
+The 32-operation live commit queue contains no R2 awaits. A separate preparation
+pool holds at most eight operations, including same-address waiters. Holding R2
+cannot stall block/pause/barrier behind a live write lock. Flooding short metadata
+requests can still exhaust that queue; the route-level emergency stop remains
+independent. Isolated restore can serialize R2 because it is not a live service.
+
+For a sealed cut, project facts whose epoch is at most E. A later block pins its
+older published body until snapshot finish, abort or 24-hour expiry. Explicit
+reclaim checks the pin and permanent block before deleting outside the queue;
+future cuts cannot newly need that blocked payload. A late prepare may require
+another reclaim. There is no automatic GC. Export validates/fsyncs records before
+finish; its complete trailer requires a durable server ACK. Lost completion replies
+can be retried across restart, before another cut retires that completion receipt.
 
 ## Data and history loss
 
-New receipts include `submitted_at_ms`, Unix epoch milliseconds assigned once in
-the first quota-reservation transaction for validated bytes. The exact value is
-copied to R2 custom metadata (decimal string), retained by pending repair,
-duplicate POST, restart and block/tombstone operations, and returned on success.
-A v0.5 schema upgrade adds a nullable column without fabricating missing history.
-Tests cover failures on both sides of the R2 write, restart, duplicates, metadata
-corruption and migration with preserved quota/block state. R2's own upload time
-does not substitute for this original fact. These are trusted host timestamps,
-not cryptographic attestations or a total order; the store has no sequence.
+`reserved_at_ms`, `submitted_at_ms` and `blocked_at_ms` record separate service
+commits in SQLite. Publication time is assigned only after verified private bytes
+are prepared; retries and restoration preserve the original facts. R2 stores
+intrinsic digest/encoding metadata, not publication time or epoch. The barrier can
+run during a PUT, so an upload-start epoch must never stand for publication.
+These are trusted host timestamps, not cryptographic attestations, monotonic time
+or a total order. Epochs identify cuts, not order within a cut. Schema 3/archive v2
+replace earlier undeployed local data without a compatibility path.
 
 **Remaining gap:** naming acceptance/order is still an in-memory experiment.
 Each service owns its own admission facts; object upload can precede acceptance.
@@ -132,8 +138,8 @@ authoritative: live R2 objects alone omit pending reservations and suppressed by
 
 Recovery must include the control plane as well as R2 objects:
 
-- Receipts, tombstones, quota reservations/balances, policy overrides and schema
-  identity must agree with the restored objects. Recreating a namespace silently
+- Receipt facts, quota debits, policy and epoch identity must agree with the
+  restored objects. Live balances are reset to zero, not restored. Recreating a namespace silently
   creates new authority state even if the old bucket still exists.
 - Restoring a snapshot can resurrect spent tickets, restore stale quota credit,
   forget newer blocks and reuse sequence numbers. Clearing tickets addresses only
@@ -155,21 +161,21 @@ database and cannot be exercised by local Miniflare PITR. R2 durability protects
 against hardware loss, not accidental/authorized deletion. These facilities do
 not automatically provide a coordinated application recovery. [1][2]
 
-Do not indiscriminately lock the live R2 bucket: bucket locks prohibit overwrites,
-including the tombstone replacement that `block` relies on. Consider retention
-protection for an independently controlled recovery copy; decide how suppression
-applies to that copy as well. It must not become another public serving path. [3]
+Do not indiscriminately lock the live R2 bucket: retention locks can prevent
+physical reclamation even though SQL blocking still refuses public reads. Consider
+retention protection for an independently controlled recovery copy; decide how
+suppression applies there too. It must not become another public serving path. [3]
 
 ## Cost and availability attacks
 
 | Attack or accident | Existing bound | Remaining decision / response |
 | --- | --- | --- |
-| Many tiny valid uploads | 8 KiB minimum debit; both growth buckets | Receipts/tombstones accumulate permanently. Measure SQL allocation, not just source bytes; plan capacity before saturation. |
+| Many tiny valid uploads | 8 KiB minimum debit; both growth buckets | Receipt facts accumulate permanently. Measure SQL allocation, not just source bytes; plan capacity before saturation. |
 | Abandoned challenge requests | Global issuance bucket, TTL and bounded table | Work is paid after issuance. A client can consume the public allowance without solving anything. This bounds storage but permits cheap starvation. Per-IP limits are approximate; many identities defeat fairness assumptions. |
 | Invalid proofs / many valid uploads | Global attempt credit before proof hash; single-use body admission; bounded bodies | Attackers can consume shared allowance. Increasing PoW does not stop malformed-request or challenge-issuance floods. Honest availability is best effort. |
-| Repeated GET/HEAD/conditional GET or nonexistent-address lookups | Canonical bounded paths, capped verified bodies | Each can reach R2; byte admission quotas do not cover read costs. HEAD/304 still verify the body. A per-IP read limiter can reduce downstream work but is not a global dollar cap. |
+| Repeated GET/HEAD/conditional GET or nonexistent-address lookups | Canonical bounded paths, capped verified bodies | Each canonical lookup reaches metadata; allowed reads also reach R2. Byte quotas do not cover read costs. HEAD/304 still verify the body. A per-IP read limiter can reduce downstream work but is not a global dollar cap. |
 | Stats, OPTIONS and rejected traffic | Stats cached briefly; cheap header/route rejection | Requests reaching the Worker still cost invocation work. Many PoPs can miss their separate stats caches. Do not add a global SQL write per read merely for accounting. |
-| Slow client / storage operation | Body deadline; bounded mutation queue | A storage await can stall mutations; reads remain independent. Disabling all public routes is the broader stop. Never unlock a still-active write to improve latency. |
+| Slow client / storage operation | Body deadline; separate eight-operation preparation pool and 32-operation commit queue | Stalled R2 can fill preparation slots but does not hold block/barrier commits. Reads depend on SQL and R2. Disabling routes remains the broader stop. |
 | Failed writes, retries and blocks | Permanent reservations, request budgets | Reservations bound new logical admission, not every physical PUT. Reconciliation and admin operations need cost headroom. |
 | Oversized remote responses or excessive client solving | Client bounds/timeouts; no redirects or automatic retry storms | A remote host can still deny service. A valid hash does not imply safe execution; VM and source-graph bounds remain separate. |
 
@@ -215,9 +221,9 @@ disaster recovery, billing, the Cloudflare edge limiter or adversarial load.
 The separate recovery drill now deletes both local source databases, restores
 the archive into fresh resources, verifies original timestamps, accounting and
 suppression, and runs the recovered fern and its imported library. Failure tests
-cover interrupted writes, invalid archives and the durable maintenance freeze.
-See [the recovery invariant map](store/RECOVERY.md#small-trusted-boundary) for this
-additional trusted boundary. The archive checksum needs an independently trusted
+cover interrupted writes, invalid archives, held R2 across the barrier, later blocks,
+pin expiry and lost finish replies. See [the recovery runbook](store/RECOVERY.md)
+for this additional trusted boundary. The archive checksum needs an independently trusted
 copy; no checksum can infer unknown post-snapshot blocks or admission history.
 
 Before opening the experimental store: complete the isolated cloud rehearsal,

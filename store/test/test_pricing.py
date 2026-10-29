@@ -23,11 +23,18 @@ class PricingTests(unittest.TestCase):
         self.assertEqual(result["new_blobs"], 384_000)
         self.assertEqual(result["full_credit_month_reservation_ceiling"], 409_600)
         self.assertEqual(result["rolling_24h_debit_ceiling_mib"], 200)
-        self.assertEqual(result["usage"]["do_requests"], 1_152_000)
+        self.assertEqual(result["usage"]["do_requests"], 4_152_000)
         self.assertEqual(result["costs_usd"]["DO duration"], 0)
         burst = estimate(Scenario(spend_saved_credit=True))
         self.assertEqual(burst["new_blobs"], 409_600)
         self.assertEqual(burst["source_start_gb"], result["source_start_gb"])
+
+    def test_public_reads_include_authoritative_metadata(self):
+        no_reads = estimate(Scenario(reads=0))
+        reads = estimate(Scenario(reads=1000))
+        self.assertEqual(reads["usage"]["do_requests"] - no_reads["usage"]["do_requests"], 1000)
+        self.assertEqual(reads["usage"]["sql_rows_read"] - no_reads["usage"]["sql_rows_read"], 2000)
+        self.assertEqual(reads["usage"]["r2_a"], no_reads["usage"]["r2_a"])
 
     def test_floor_is_accounting_not_padding(self):
         ordinary, tiny = estimate(), estimate(Scenario(average_blob_kib=1))
@@ -63,7 +70,7 @@ class PricingTests(unittest.TestCase):
         self.assertEqual(extra["usage"]["sql_rows_written"] - basic["usage"]["sql_rows_written"], 500_000)
         self.assertEqual(extra["source_end_gb"], basic["source_end_gb"])
         self.assertEqual(extra["ticket_storage_gb_ceiling"], basic["ticket_storage_gb_ceiling"])
-        self.assertEqual(basic["costs_usd"]["DO requests"], 0.15)
+        self.assertEqual(basic["costs_usd"]["DO requests"], 0.60)
         self.assertEqual(estimate(Scenario(challenges_per_minute=1))["new_blobs"], 43_200)
 
     def test_bad_scenarios_fail_clearly(self):

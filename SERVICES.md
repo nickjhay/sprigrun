@@ -7,7 +7,8 @@ not new deployed endpoints or a garbage collector.
 
 The [review after the first recovery drill](#review-after-the-first-recovery-drill)
 below adds two implemented cleanups and identifies the next design decisions.
-It does not change the v1 archive format or the current channel proof protocol.
+The later online-checkpoint implementation replaces archive v1 with logical v2;
+the channel proof protocol is unchanged. See [RECOVERY.md](store/RECOVERY.md).
 
 ## One publishing request above the blob store
 
@@ -68,13 +69,13 @@ unbounded lifetime, not a promise of unlimited provider capacity or availability
 Pressure-driven eviction is a later, explicit operation. Channels keep their own
 bounded rolling retention and incarnation lifetime.
 
-The store now records its own `submitted_at_ms` in the first quota reservation and
-R2 metadata, preserving it through retries, duplicates and tombstoning. R2 returns
-custom metadata with a GET; a separate HEAD is unnecessary. The generic store
-allocates no submission sequence. Services own any sequence/acceptance facts they
-need, independently of when the blob was stored. A naming metadata copy must be
-repairable from its atomic acceptance record, and coordinated with blocking and
-other metadata writers. Independent metadata merges are not a cross-service transaction.
+The store records immutable reservation, publication and block epochs/times in
+SQLite. `submitted_at_ms` is first publication, after private R2 preparation.
+R2 metadata carries intrinsic payload information only. The generic store has no
+submission sequence. Services own any sequence/acceptance facts they need,
+independently of when bytes were stored. A naming metadata projection must be
+repairable from its atomic acceptance record; independent metadata updates are
+not a cross-service transaction.
 
 Application classes such as ordinary source and naming evidence are
 independent of R2's billing storage tiers. A preexisting ordinary blob used as
@@ -99,7 +100,7 @@ recent recoverable ancestry while older evidence lives in durable storage.
 
 | Operation today | Backing-store operations |
 | --- | --- |
-| Uncached blob GET, HEAD or conditional GET | One R2 GET, including metadata and body; verify before returning. |
+| Uncached blob GET, HEAD or conditional GET | One DO metadata lookup, then one R2 GET; verify before returning. Denied lookup avoids R2. |
 | New successful blob publication | One conditional R2 PUT, no preliminary GET. |
 | Retry of an ambiguous committed write | Conditional PUT fails its absence condition, then one verified GET. |
 | Already-confirmed upload refused at challenge | SQLite receipt lookup, no R2 call. |
@@ -130,7 +131,7 @@ explicitly inlined in the resolution response.
   authentication and domain-separated proof messages remain independent.
 - Publication attempts its existing conditional R2 PUT first. A GET is needed
   only when an object already exists and must be reconciled. Fault tests preserve
-  quota reservations, retry behavior, integrity checking and tombstone protection.
+  quota reservations, retry behavior, integrity checking and permanent block protection.
 - Root checks now include the full store test suite and server/client typechecks,
   plus the nine existing Python pricing tests. Previously root CI ran the
   workbench's store integration but omitted the store's own suite.
@@ -214,32 +215,13 @@ changes below. The recommendations are design proposals, not deployed behavior.
 
 ### 1. Make the next archive a logical store format
 
-The v1 archive intentionally captures the whole `Control` and `Config` structures
-and R2 custom/HTTP metadata. This was convenient for the first exact roundtrip,
-but carries implementation details into recovery:
-
-- Four saved balances are validated and then discarded by zero-credit restore.
-- Restore requires an identical entire configuration, so changing even the
-  browser cache duration or upload timeout rejects it.
-- R2 HTTP metadata is copied although public serving constructs its own headers.
-- `policyEnv()` maps an archive configuration back through environment variables
-  to validate it. That is coupling between deployment setup and the archive.
-
-For the replacement format, prefer original receipt facts, exact bytes,
-per-object validation contract, needed operator policy, and integrity checkpoints.
-Construct fresh paused controls separately. Keep source configuration as provenance
-if useful, without requiring every operational setting to match the target.
-Historical naming policy remains different: changing it can change replay results.
-The stored validation policy still determines how an older blob is read, regardless
-of the target's current admission policy.
-
-Nothing is deployed and there are no compatibility obligations. Replace the old
-format and fixtures together; reset/reseed disposable local state. Specify the
-required facts and unknown-field handling without a migration framework. Keep the
-aggregate cross-check and ordered checksum: deliberate redundancy detects drift.
-Base64 is still useful for exact bytes and a predictable size bound, including
-NUL-heavy UTF-8. Reformatting source or inventing a general serialization language
-would not simplify this recovery boundary.
+Implemented as `sprig-store-snapshot-v2`: immutable receipt facts, exact published
+bytes, per-object validation policy, effective PoW settings, count and checksum.
+Refill balances, deployment configuration and R2 HTTP metadata are omitted. Restore
+constructs fresh paused controls and permits changed deployment settings. No
+configuration-to-environment adapter or legacy parser remains. Aggregate cross-checks
+and exact-byte base64 remain useful integrity redundancy. Reset/reseed disposable
+old local state; this project has no deployed legacy data to preserve.
 
 ### 2. Separate snapshot restoration from live replacement
 
@@ -255,42 +237,26 @@ that requires an acknowledgement/durability design too; an extra asynchronous lo
 alone is insufficient. Do not introduce a universal service event framework just
 to give the existing snapshot tool a broader name.
 
-Keep the durable maintenance session and explicit `RESTORE_MODE` gate. A pause
-flag alone would still allow administrative changes during export. Removing the
-deployment gate during a partial restore can expose reads because ordinary blob
-reads intentionally bypass the coordinator. That operator-controlled cutover is
-a real boundary, not two interchangeable ways of pausing the same operation.
+Keep the explicit deployment gate and persistent restore session. The metadata
+read gate now independently refuses incomplete restores if `RESTORE_MODE` is removed
+early. Completed restores remain paused; exposing reads and routing public traffic
+are still deliberate operational steps.
 
-### 3. Decide the scale of the write-pause window
+### 3. Keep the commit pause independent of copying
 
-The export makes one serial HTTP/DO request per receipt, plus page requests and
-one R2 GET for each non-blocked receipt. Writes and administrative changes remain
-frozen while it runs. The snapshot is simple to reason about; the pause grows with
-the entire store, not just that day's new data.
+Implemented: [CHECKPOINTS.md](store/CHECKPOINTS.md) seals the epoch in a short SQL
+commit. Private R2 preparation and snapshot reads run outside that queue. Live
+blocks preserve older pinned bodies. Fault tests hold R2 across seal and verify
+both sides of the cut through restart and restoration. One-way facts eliminate
+the proposed general preimage log. Read cost now includes one DO metadata RPC.
 
-At steady-state saturation, 100 MiB/day divided by an 8 KiB minimum debit permits
-12,800 new small-object reservations/day, about 4.67 million/year. This is an upper
-envelope from the configured quota, not observed traffic. The CLI's default
-100,000-record safety limit would be reached in about eight such days. At a
-*hypothetical* 100 ms per record round trip, one day's receipts alone take roughly
-21 minutes to export serially; neither latency nor cloud CPU has been measured.
-
-Recommendation: use the existing drill for the bootstrap, measure a realistic
-population before scheduling backups, and set record/byte/time limits explicitly.
-If round trips dominate, bounded pages of full records are the first candidate.
-Incremental copies or online snapshots need a change-history design and should
-follow an actual recovery/pause requirement. Do not add concurrency until it has
-explicit object, byte, request and interruption bounds.
-
-Nick's subsequent clarification supersedes the preimage/abort-on-block proposal:
-[CHECKPOINTS.md](store/CHECKPOINTS.md) specifies a commit-only barrier, with private
-R2 preparation outside short metadata transactions. Preserve one-way reservation,
-publication and block facts with their epochs. Later blocks suppress live reads
-while the sealed cut pins old private payloads. This requires a metadata lookup on
-public reads. `npm run demo:checkpoint` exercises the revised offline model; the
-Worker still has its full-export freeze pending integration. There is no deployed
-legacy to preserve: replace schema/archive/fixtures together instead of maintaining
-both formats.
+Copy throughput still matters: saturated 100 MiB/day with an 8 KiB minimum debit
+allows 12,800 new small-object reservations/day. The CLI's default 100,000-record
+limit would cover about eight such days. A hypothetical 100 ms round trip per
+record takes about 21 minutes for one day's receipts. No cloud latency has been
+measured; this is copying time, not the write-pause window. Measure real volumes
+before scheduling exports. Bounded batches/incremental copies remain possible
+follow-ups; each needs explicit memory, byte, request and interruption bounds.
 
 ### 4. Keep eviction different from suppression
 

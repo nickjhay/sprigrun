@@ -29,7 +29,8 @@ python3 pricing.py --years 0 1 3 --json
 ```
 
 `--reads` counts network GETs/HEADs, including conditionals, after browser-cache
-hits are removed. `--cpu-ms` is average **Worker CPU**, not wall time. Extra
+hits are removed. Each allowed network read now includes one DO metadata lookup
+before R2; refused/missing addresses can avoid R2. `--cpu-ms` is average **Worker CPU**, not wall time. Extra
 Worker/DO/R2 counts model retries, denied requests, stats, preflights or other
 traffic; enter each affected product's count separately. For example, 10 million
 PUTs rejected by the global attempt limiter still mean roughly 10 million
@@ -38,9 +39,9 @@ before the coordinator contribute only the Worker count.
 
 The default scenario is 100% quota utilization with distinct 8 KiB source blobs,
 3 million network reads/month, 3 ms Worker CPU and **an estimated 512 bytes per
-SQLite receipt**, including overhead. It costs approximately **$5.60/month after
-year one** and **$7.36/month after year three**. With 12 million network reads,
-those estimates become **$7.68** and **$9.43**. These model the following 30-day
+SQLite receipt**, including overhead. It costs approximately **$6.05/month after
+year one** and **$7.80/month after year three**. With 12 million network reads,
+those estimates become **$9.48** and **$11.23**. These model the following 30-day
 month, averaging daily peak inventory rather than holding anniversary inventory
 constant. Extra traffic is zero in those examples; account allowances are assumed
 available. SQL overage rounding is conservative in the model.
@@ -79,7 +80,8 @@ or R2 call is needed. Unknown proofs still reach the global attempt limiter.
 
 At 384,000 new blobs/month, this adds 384,000 Worker requests and raises upload
 DO RPCs from 768,000 to 1,152,000. With otherwise unused allowances, the DO request
-charge is $0.15/month. SQL issuance adds an indexed insert, eventual indexed delete
+charge for uploads alone is $0.15/month. With the default 3 million read lookups,
+the total DO request estimate is 4,152,000 and $0.60/month. SQL issuance adds an indexed insert, eventual indexed delete
 and rate-counter update per issued ticket; the model allows five extra row writes.
 Ticket-count queries conservatively budget a full bounded-table scan. These SQL
 operations remain within included allowances for the example workload.
@@ -115,7 +117,7 @@ caps the bill. The browser helper bounds its own solve time and trial count.
 This is a planning split, not four separate charges. Serving is largely covered
 by the subscription/included allowances; there is no reason to spend the spare
 money immediately. At 100 MiB/day, the first year will often be closer to $5–6
-per month than $10 if traffic stays within those allowances.
+per month (about $6.05 in this scenario) than $10 if traffic stays within those allowances.
 
 ## Prices that matter
 

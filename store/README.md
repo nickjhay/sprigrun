@@ -21,7 +21,8 @@ with assumptions in [BUDGET.md](BUDGET.md).
 [Threat model and core invariants](../THREATS.md) separates byte integrity,
 history preservation, recovery, cost and availability. [OPERATIONS.md](OPERATIONS.md)
 adds a disposable two-phase deployment rehearsal and the first-deployment runbook.
-New reservations preserve `submitted_at_ms` in SQLite and R2 metadata.
+SQLite preserves separate first-reservation and first-publication times. R2
+metadata holds only intrinsic payload information.
 [RECOVERY.md](RECOVERY.md) documents coordinated export, offline verification and
 restore into fresh isolated storage, with a local loss-and-recovery drill. Hosted
 naming acceptance/order and reconciliation of history newer than a snapshot remain
@@ -29,17 +30,15 @@ future work.
 
 ## Compatibility
 
-**v0.5 changes the storage/address format.** Hash-only URLs are not supported.
-`POST /b` now returns a `hash_length` address; it does not restore the v0.4 protocol.
-Object and receipt keys include length. The timestamp addition upgrades existing
-v0.5 receipts in place, leaving their missing historical timestamp `null`.
-This project has not provisioned or deployed any Cloudflare resources for you.
-For a first deployment, use the defaults below. If you deployed an older edition,
-keep it running separately while planning a deliberate data/block/quota migration.
-Use a fresh Worker/DO namespace **and** fresh private R2 bucket for this edition;
-do not simply point it at old storage. Startup refuses a v0.4 control schema
-rather than resetting or bypassing its quotas and permanent blocks. No automatic
-migration is supplied. The default names have a `v05` suffix to distinguish them.
+This undeployed revision uses control schema 3 and archive v2. It replaces the
+earlier local schema outright; there is no migration or legacy archive parser.
+Hash-only URLs remain unsupported. Use a fresh Worker/DO namespace and private R2
+bucket for first deployment. For local development, move aside only disposable
+store persistence (`.local/store` for the root launcher, or `store/.wrangler`
+for standalone Wrangler) and reseed; preserve any source you want before resetting it.
+Startup refuses an old schema rather than silently losing quota or block history.
+The default resource names retain their `v05` suffix; names are not schema checks.
+No Cloudflare resources have been provisioned or deployed by this work.
 
 ## Run and deploy
 
@@ -228,13 +227,12 @@ is at most 71 characters under the default 262144-byte upload cap, or 72 under
 the runtime 1 MiB ceiling. Hashes cover exact bytes with no normalization. Source
 may contain BOM, control characters, CRLF and NUL. Compressed uploads are rejected.
 
-`submitted_at_ms` is server Unix epoch milliseconds at the first successful quota
-reservation for validated bytes. It is committed atomically with the reservation
-and copied to R2 custom metadata as a decimal string before publication. Failed
-R2 writes, retries, duplicate POSTs, restarts and tombstoning retain it. It is not
-upload completion time, a total order, or naming acceptance time; each service
-owns any ordering it needs. Older v0.5 receipts have `null` (unknown), not a guessed
-timestamp. No R2 metadata rewrite or backfill of old objects is performed.
+`submitted_at_ms` is server Unix epoch milliseconds at the first **publication**
+commit, after verified bytes have reached private R2. It lives in SQLite and is
+preserved by duplicates, restart, blocking and archive recovery. Reservation has
+its own earlier `reserved_at_ms`; failed R2 work has no publication time yet.
+Neither timestamp is a total order, a client-send time or naming acceptance time.
+Each service owns the ordering it needs. R2 upload time is not used as history.
 
 There is no public enumeration, overwrite, delete, binary-upload grant or user
 identity. Hashes are references, not secrets. `Authorization` on a public write
@@ -397,11 +395,12 @@ of previously reserved writes. Reducing capacity clamps credit; increasing it
 does not refill it instantly. No padding is added to small blobs.
 
 A separate approximate per-IP/per-location edge limit allows 20 challenge/upload
-requests per minute combined. A normal new upload uses two of them. Never trust
+requests per minute combined. A challenge-first upload uses two of them; a direct POST uses one. Never trust
 X-Forwarded-For for this limiter. Global challenge and attempt limits are exact
 in the coordinator; the edge limit is only an early filter. Its namespace ID
 should be unique within your account. The FIFO mutation queue holds at most 32
-operations. The 100 ms Worker CPU limit is per invocation, not a monthly bill cap.
+short metadata operations. A separate pool holds at most eight preparations,
+including same-address waiters. R2 work holds no live commit lock. The 100 ms Worker CPU limit is per invocation, not a monthly bill cap.
 
 Reads and rejected traffic still cost money. PoW and these quotas do not bound
 total request billing, stop all denial of service, or guarantee fair distribution.
@@ -413,7 +412,8 @@ disabling the Worker route is the broader traffic stop.
 Successful reads use `private, max-age=31536000, immutable`, `text/plain`,
 `nosniff` and ETag `"sha256-<hash_length>"`. GET/HEAD verifies size, hash and the
 recorded source validation policy before any `304`. There is no shared blob cache;
-stale Cache API entries cannot bypass R2. Browser copies cannot be recalled.
+stale Cache API entries cannot bypass current SQLite publication/block checks
+and verified R2 bytes. A network read adds one DO RPC before its R2 GET. Browser copies cannot be recalled.
 Errors, challenges, uploads and admin replies use `no-store`. Do not override
 these rules with public/stale CDN caching or expose the bucket directly.
 
@@ -424,22 +424,29 @@ Set `BLOB_STORE_URL` and `BLOB_STORE_ADMIN_TOKEN` in your operator environment
 npm run admin -- pause
 npm run admin -- resume
 npm run admin -- block HASH_LENGTH
+npm run admin -- reclaim HASH_LENGTH
 npm run admin -- pow 16 8
 ```
 
 Routes are `POST /admin/pause`, `/admin/resume`, `/admin/block/<hash_length>`,
 and `/admin/pow/<bits>[/<per-byte>]` or `/admin/pow/default`, using Bearer auth.
 They expose no CORS permission; unauthenticated or disabled endpoints return 404.
-A block permanently records the address and replaces its R2 object with a random
-32-byte tombstone. Reads return 410 instead of those bytes. A failed block may
-leave the old origin object readable: repeat until successful and verify an
-uncached GET. Already-running responses and browser copies can remain. Retain
-receipts/tombstones and avoid lifecycle rules that delete them.
+A block permanently commits refusal in SQLite, without an R2 call. Subsequent
+metadata checks return 410, including HEAD/conditional requests. Already-admitted
+responses and browser copies can remain. Keep the bucket private.
+
+`POST /admin/reclaim/<hash_length>` (the `reclaim` command) physically removes an
+already-blocked payload when no active snapshot needs it; otherwise it returns
+409. Blocks leave private bytes until explicitly reclaimed. A late in-flight PUT
+may leave private bytes again, so reclaim may need repeating; publication still
+fails against the permanent block. There is no automatic GC or unblock operation.
+Preserve receipts and avoid out-of-band mutations/lifecycle deletion of live or
+snapshot-pinned payloads. [RECOVERY.md](RECOVERY.md) covers online snapshots.
 
 `GET /` reports effective/default work settings, override state, outstanding
 unexpired tickets, table/rate/lifetime limits, pause state, source limits, both
 byte-bucket balances, challenge credit, attempt rates, cumulative reservations,
-confirmed unblocked blob/byte counts, blocks and cache policy. It contains no
+confirmed unblocked blob/byte counts, blocks, current snapshot epoch, restore-lock state and cache policy. It contains no
 source, hashes, ticket IDs, IPs or admin tokens. The ticket count scans a bounded
 indexed table; other counters are stored accounting, not an R2 inventory. External
 bucket changes and pending failures can make them differ from physical storage.

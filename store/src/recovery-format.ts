@@ -1,29 +1,27 @@
-// Shared, bounded archive validation. No storage calls or executable archive content.
+// Logical archive validation. Exact bytes and immutable facts; no deployment schema.
 import { createHash } from 'node:crypto';
 import { Buffer } from 'node:buffer';
-import { config, HARD_MAX_BLOB_BYTES, type Config } from './config.ts';
+import { HARD_MAX_BLOB_BYTES } from './config.ts';
 import { validate } from './bytes.ts';
 import { parseAddress, workTarget } from './proof.ts';
-import { HttpError, type Env } from './types.ts';
-import type { Control, Receipt } from './state.ts';
-
+import { HttpError } from './types.ts';
+import { emptyTotals, status, type Receipt, type Totals } from './state.ts';
+export { emptyTotals } from './state.ts';
+export type { Totals } from './state.ts';
 export const MAX_RECORD_BYTES = 2 * 1024 * 1024;
 export const MAX_HEADER_BYTES = 16384;
 export const PAGE_SIZE = 128;
 export const HASH = /^[0-9a-f]{64}$/;
-export const FORMAT = 'sprig-store-snapshot-v1';
+export const FORMAT = 'sprig-store-snapshot-v2';
 export interface SnapshotHeader {
   type: 'header'; format: typeof FORMAT; id: string; source_origin: string;
-  captured_at_ms: number; receipts: number; policy: Config; control: Control;
+  captured_at_ms: number; expires_at_ms: number; epoch: number; receipts: number;
+  totals: Totals; proof_of_work: { bits: number; per_byte: number };
 }
-export type ObjectData = {
-  body: string; custom: Record<string, string>;
-  http: Omit<R2HTTPMetadata, 'cacheExpiry'> & { cacheExpiry?: string };
-};
-export interface SnapshotRecord { type: 'record'; receipt: Receipt; object: ObjectData | null }
-export interface Totals { reservedBlobs: number; reservedBytes: number; confirmedBlobs: number; confirmedBytes: number; blockedAddresses: number }
-export interface Progress { after: string; count: number; chain: string; totals: Totals }
-
+export interface SnapshotRecord {
+  type: 'record'; receipt: Receipt; object: { body: string; validation_policy: string } | null;
+}
+export interface Progress { after: string; count: number; chain: string; totals: Totals; epoch: number }
 export function check(ok: unknown, code = 'invalid_snapshot'): asserts ok {
   if (!ok) throw new HttpError(400, code);
 }
@@ -45,97 +43,70 @@ export function bareOrigin(value: unknown): string {
   check(url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)), 'invalid_origin');
   return url.origin;
 }
-
-// Reuse the actual configuration validator, including hard ceilings and bucket relationships.
-function policyEnv(p: Config): Partial<Env> {
-  return {
-    MAX_BLOB_BYTES: String(p.maxBytes), MINIMUM_DEBIT_BYTES: String(p.minimumDebit), VALIDATION_POLICY: p.validationPolicy,
-    PROOF_OF_WORK_BITS: String(p.proofOfWorkBits), PROOF_OF_WORK_PER_BYTE: String(p.proofOfWorkPerByte),
-    CHALLENGE_BURST: String(p.challenges?.capacity), CHALLENGES_PER_MINUTE: String(p.challenges?.refill),
-    CHALLENGE_CAPACITY: String(p.challengeCapacity), CHALLENGE_TTL_SECONDS: String(p.challengeTtlMs / 1000),
-    LONG_CAPACITY_BYTES: String(p.long?.capacity), LONG_REFILL_BYTES_PER_DAY: String(p.long?.refill),
-    BURST_CAPACITY_BYTES: String(p.burst?.capacity), BURST_REFILL_BYTES_PER_HOUR: String(p.burst?.refill),
-    ATTEMPT_CAPACITY: String(p.attempts?.capacity), ATTEMPTS_PER_MINUTE: String(p.attempts?.refill),
-    UPLOAD_TIMEOUT_MS: String(p.uploadTimeoutMs), BROWSER_CACHE_SECONDS: String(p.browserCacheSeconds),
-  };
-}
 export function equalJSON(a: unknown, b: unknown): boolean {
   const sorted = (value: unknown): unknown => value && typeof value === 'object' && !Array.isArray(value)
     ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, sorted(item)])) : value;
   return JSON.stringify(sorted(a)) === JSON.stringify(sorted(b));
 }
-export const emptyTotals = (): Totals => ({ reservedBlobs: 0, reservedBytes: 0, confirmedBlobs: 0, confirmedBytes: 0, blockedAddresses: 0 });
-
 export function validateHeader(value: unknown): SnapshotHeader {
-  fields(value, ['type', 'format', 'id', 'source_origin', 'captured_at_ms', 'receipts', 'policy', 'control']);
+  fields(value, ['type', 'format', 'id', 'source_origin', 'captured_at_ms', 'expires_at_ms', 'epoch', 'receipts', 'totals', 'proof_of_work']);
   const h = value as SnapshotHeader;
   check(h.type === 'header' && h.format === FORMAT && typeof h.id === 'string' && HASH.test(h.id));
   check(bareOrigin(h.source_origin) === h.source_origin);
-  integer(h.captured_at_ms); integer(h.receipts);
-  check(h.policy && typeof h.policy === 'object');
-  try { check(equalJSON(config(policyEnv(h.policy)), h.policy)); } catch { throw new HttpError(400, 'invalid_snapshot_policy'); }
-  const s = h.control;
-  fields(s, ['schema', 'paused', 'long', 'burst', 'attempts', 'challenges', ...Object.keys(emptyTotals())], ['proofOfWorkBits', 'proofOfWorkPerByte']);
-  check(s.schema === 2 && s.paused === true);
-  if (s.proofOfWorkBits !== undefined) integer(s.proofOfWorkBits, 256);
-  if (s.proofOfWorkPerByte !== undefined) integer(s.proofOfWorkPerByte, 1e9);
-  try { workTarget(s.proofOfWorkBits ?? h.policy.proofOfWorkBits, s.proofOfWorkPerByte ?? h.policy.proofOfWorkPerByte, h.policy.maxBytes); }
-  catch { throw new HttpError(400, 'invalid_snapshot_work'); }
-  for (const key of ['long', 'burst', 'attempts', 'challenges'] as const) {
-    const b = s[key]; fields(b, ['tokens', 'atMs', 'remainder']);
-    integer(b.tokens, h.policy[key].capacity); integer(b.atMs); integer(b.remainder, h.policy[key].periodMs - 1);
-  }
-  for (const key of Object.keys(emptyTotals()) as (keyof Totals)[]) integer(s[key]);
+  integer(h.captured_at_ms); integer(h.expires_at_ms); integer(h.epoch, Number.MAX_SAFE_INTEGER - 1); integer(h.receipts);
+  check(h.expires_at_ms > h.captured_at_ms);
+  fields(h.totals, Object.keys(emptyTotals()));
+  for (const n of Object.values(h.totals)) integer(n);
+  fields(h.proof_of_work, ['bits', 'per_byte']);
+  integer(h.proof_of_work.bits, 256); integer(h.proof_of_work.per_byte, 1e9);
+  try { workTarget(h.proof_of_work.bits, h.proof_of_work.per_byte, HARD_MAX_BLOB_BYTES); }
+  catch { throw new HttpError(400, 'invalid_snapshot_policy'); }
   return h;
 }
-
 export function validateRecord(value: unknown): { record: SnapshotRecord; bytes: Uint8Array | null } {
   fields(value, ['type', 'receipt', 'object']);
   const record = value as SnapshotRecord, r = record.receipt;
   check(record.type === 'record');
-  fields(r, ['address', 'status', 'bytes', 'debit', 'submitted_at_ms']);
+  fields(r, ['address', 'bytes', 'debit', 'reserved_epoch', 'reserved_at_ms', 'published_epoch', 'submitted_at_ms', 'blocked_epoch', 'blocked_at_ms']);
   check(typeof r.address === 'string');
   const address = parseAddress(r.address); check(address);
-  check(['pending', 'stored', 'blocked'].includes(r.status));
   integer(r.bytes, HARD_MAX_BLOB_BYTES); integer(r.debit, HARD_MAX_BLOB_BYTES);
-  if (r.submitted_at_ms !== null) integer(r.submitted_at_ms);
-  if (r.debit === 0) check(r.status === 'blocked' && r.bytes === 0 && r.submitted_at_ms === null);
-  else check(r.bytes === address.bytes && r.debit >= Math.max(1, r.bytes));
-  if (r.status === 'blocked') { check(record.object === null); return { record, bytes: null }; }
-  if (record.object === null) { check(r.status === 'pending'); return { record, bytes: null }; }
+  check(r.bytes === address.bytes);
+  for (const [epoch, time] of [['reserved_epoch','reserved_at_ms'], ['published_epoch','submitted_at_ms'], ['blocked_epoch','blocked_at_ms']] as const) {
+    if (r[epoch] === null) check(r[time] === null);
+    else { integer(r[epoch]); integer(r[time]); }
+  }
+  if (r.reserved_epoch === null) check(r.debit === 0 && r.published_epoch === null && r.blocked_epoch !== null);
+  else check(r.debit >= Math.max(1, r.bytes));
+  if (r.published_epoch !== null) check(r.reserved_epoch !== null && r.reserved_epoch <= r.published_epoch);
+  if (r.blocked_epoch !== null) check((r.reserved_epoch === null || r.reserved_epoch <= r.blocked_epoch)
+    && (r.published_epoch === null || r.published_epoch <= r.blocked_epoch));
+  if (status(r) !== 'stored') { check(record.object === null); return { record, bytes: null }; }
+  check(record.object !== null);
   const object = record.object;
-  fields(object, ['body', 'custom', 'http']);
+  fields(object, ['body', 'validation_policy']);
   check(typeof object.body === 'string' && object.body.length <= Math.ceil(HARD_MAX_BLOB_BYTES / 3) * 4);
   const bytes = Buffer.from(object.body, 'base64');
   check(bytes.toString('base64') === object.body && bytes.length === address.bytes && digest(bytes) === address.digest, 'snapshot_body_mismatch');
-  check(object.custom && typeof object.custom === 'object' && !Array.isArray(object.custom));
-  check(Object.values(object.custom).every(value => typeof value === 'string') && Buffer.byteLength(JSON.stringify(object.custom)) <= 16384);
-  check(object.custom.kind === 'blob' && object.custom.sha256 === address.digest);
-  check(['utf8-v1', 'ascii-v1'].includes(object.custom.validation_policy ?? ''));
-  check(r.submitted_at_ms === null ? object.custom.submitted_at_ms === undefined : object.custom.submitted_at_ms === String(r.submitted_at_ms), 'snapshot_timestamp_mismatch');
-  validate(bytes, object.custom.validation_policy!);
-  fields(object.http, [], ['contentType', 'contentLanguage', 'contentDisposition', 'contentEncoding', 'cacheControl', 'cacheExpiry']);
-  check(Object.values(object.http).every(value => typeof value === 'string') && Buffer.byteLength(JSON.stringify(object.http)) <= 16384);
-  if (object.http.cacheExpiry !== undefined) {
-    check(Number.isFinite(Date.parse(object.http.cacheExpiry)));
-    check(new Date(object.http.cacheExpiry).toISOString() === object.http.cacheExpiry);
-  }
+  check(['utf8-v1', 'ascii-v1'].includes(object.validation_policy));
+  validate(bytes, object.validation_policy);
   return { record, bytes };
 }
-
 export function progress(header: SnapshotHeader): Progress {
-  return { after: '', count: 0, chain: digest(JSON.stringify(header)), totals: emptyTotals() };
+  return { after: '', count: 0, chain: digest(JSON.stringify(header)), totals: emptyTotals(), epoch: header.epoch };
 }
 export function advance(previous: Progress, r: Receipt, line: string): Progress {
   check(r.address > previous.after, 'snapshot_order');
+  for (const key of ['reserved_epoch', 'published_epoch', 'blocked_epoch'] as const)
+    check(r[key] === null || r[key]! <= previous.epoch, 'snapshot_future_fact');
   const totals = { ...previous.totals };
-  if (r.debit > 0) { totals.reservedBlobs++; totals.reservedBytes += r.debit; }
-  if (r.status === 'stored') { totals.confirmedBlobs++; totals.confirmedBytes += r.bytes; }
-  if (r.status === 'blocked') totals.blockedAddresses++;
+  if (r.reserved_epoch !== null) { totals.reservedBlobs++; totals.reservedBytes += r.debit; }
+  if (status(r) === 'stored') { totals.confirmedBlobs++; totals.confirmedBytes += r.bytes; }
+  if (status(r) === 'blocked') totals.blockedAddresses++;
   for (const value of Object.values(totals)) integer(value);
-  return { after: r.address, count: previous.count + 1, chain: nextChain(previous.chain, line), totals };
+  return { after: r.address, count: previous.count + 1, chain: nextChain(previous.chain, line), totals, epoch: previous.epoch };
 }
 export function complete(header: SnapshotHeader, p: Progress, chain: string): void {
   check(HASH.test(chain) && p.chain === chain && p.count === header.receipts, 'snapshot_incomplete');
-  for (const key of Object.keys(emptyTotals()) as (keyof Totals)[]) check(p.totals[key] === header.control[key], 'snapshot_accounting_mismatch');
+  check(equalJSON(p.totals, header.totals), 'snapshot_accounting_mismatch');
 }

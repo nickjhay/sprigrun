@@ -25,8 +25,8 @@ It rejects compressed bodies. Hashes cover exact bytes, including newlines and B
 
 Success is JSON: address, digest, bytes, url, submitted_at_ms. Location and url
 contain /b/{address}. New bytes return 201; identical bytes already stored return
-200 without another growth debit. submitted_at_ms is the original reservation
-time in Unix epoch milliseconds, or null for older objects whose time is unknown.
+200 without another growth debit. submitted_at_ms is the original publication
+time in Unix epoch milliseconds, preserved by retries and restoration.
 
 ## Read
 

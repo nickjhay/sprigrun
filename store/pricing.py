@@ -15,7 +15,8 @@ https://developers.cloudflare.com/durable-objects/platform/pricing/
 
 This is a scenario model, NOT a bill cap. It assumes allowances are available
 to this service; edit Prices for remaining account allowances. All network blob
-GETs/HEADs cost a Worker request and conservatively one R2 read, including 304s.
+GETs/HEADs cost a Worker request, one DO metadata RPC and conservatively one R2
+read, including 304s. Refused/missing metadata can avoid the R2 read.
 Browser cache hits never reach the service and are excluded from --reads.
 The modeled challenge-first uploads use two Worker requests, three DO RPCs and
 one R2 PUT. Direct no-work POST uses one Worker request, two DO RPCs and no ticket
@@ -23,7 +24,9 @@ rows. This model over-allocates upload overhead for that path. An automatic
 client's rejected POST before a challenge needs one extra Worker/DO request and
 attempt credit when work is enabled; account for it in extra request counts.
 The model additionally allows one R2 read per upload for reconciliation; the
-common new-object path no longer needs that read.
+common new-object path does not need that read. Preparation and publication
+metadata commits share the publish RPC; they add no R2 copy or second PUT. Backup
+exports/restores and explicit reclamation belong in the extra-operation counts.
 Challenge issuance uses a receipt lookup, with no R2 request. Outstanding tickets
 add an indexed insert/delete pair and issuance-counter update per ticket.
 --extra-challenges models additional successfully issued, abandoned tickets;
@@ -206,13 +209,13 @@ def estimate(s: Scenario = Scenario(), p: Prices = Prices()) -> dict:
         r2_gb_months=average_objects * size / GB,
         r2_a=new_objects + s.extra_r2_a,
         r2_b=s.reads + new_objects + s.extra_r2_b,
-        do_requests=2 * new_objects + issued + s.extra_do_requests,
+        do_requests=s.reads + 2 * new_objects + issued + s.extra_do_requests,
         do_gb_seconds=DAYS * 86400 * 0.128,
         sql_gb_months=average_objects * s.receipt_bytes / GB + ticket_storage_gb,
         # Conservative rough counts including indexed receipt work, worst-case
         # ticket-count scans, and eventual expiry deletions. Extra RPCs
         # allow two reads and one write each; use Usage directly for measured SQL.
-        sql_rows_read=8 * new_objects + issued * (s.challenge_capacity + 4) + 2 * s.extra_do_requests,
+        sql_rows_read=2 * s.reads + 8 * new_objects + issued * (s.challenge_capacity + 4) + 2 * s.extra_do_requests,
         sql_rows_written=8 * new_objects + 5 * issued + s.extra_do_requests,
     )
     costs = bill(usage, p)
