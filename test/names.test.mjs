@@ -6,7 +6,7 @@ import { NAME_PROTOCOL, NAME_LIMITS, NameGraph, genesisBytes, publicKeyHex, reco
 const text = value => new TextEncoder().encode(value);
 const hash = bytes => createHash('sha256').update(bytes).digest('hex') + '_' + bytes.length;
 const target = label => hash(text(label));
-const encode = record => text(JSON.stringify(record) + '\n');
+const source = bytes => new TextDecoder().decode(bytes);
 async function key() {
   const pair = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   return { ...pair, id: await publicKeyHex(pair.publicKey) };
@@ -27,15 +27,24 @@ async function fixture(capacity) {
 
 test('name records use exact content addresses and independently verifiable Ed25519 signatures', async () => {
   const f = await fixture();
+  assert.equal(source(f.bytes), `protocol ${NAME_PROTOCOL}\nkind genesis\nnonce ${'ab'.repeat(16)}\nkey ${f.recovery.id}\nkey ${f.daily.id}\n`);
   assert.equal(await recordAddress(f.bytes), f.genesis);
   assert.deepEqual(f.graph.resolve(), { kind: 'head', head: f.genesis, target: null, depth: 0, chain: [f.genesis], relation: 'same' });
   const first = await f.make(f.genesis);
-  const { signature, ...unsigned } = JSON.parse(new TextDecoder().decode(first.bytes));
+  const full = source(first.bytes);
+  const signatureLine = full.match(/^signature ([0-9a-f]{128})\n$/m);
+  const signature = signatureLine[1];
   const publicKey = createPublicKey({ key: await crypto.subtle.exportKey('jwk', f.daily.publicKey), format: 'jwk' });
-  const payload = Buffer.from(NAME_PROTOCOL + '/update\n' + JSON.stringify(unsigned) + '\n');
+  const payload = Buffer.from(NAME_PROTOCOL + '/update\n' + full.slice(0, signatureLine.index));
   assert(verify(null, payload, publicKey, Buffer.from(signature, 'hex')));
   await f.add(first);
   assert.equal(f.graph.resolve().target, target('fern'));
+  const inspected = f.graph.get(first.address);
+  assert.equal(inspected.rank, 1);
+  inspected.record.keys.reverse(); inspected.record.target = target('changed');
+  assert.equal(f.graph.get(first.address).record.target, target('fern'));
+  assert.deepEqual(f.graph.get(first.address).record.keys, f.keys);
+  assert.throws(() => f.graph.get(target('unknown')), /name_record_missing/);
   assert.throws(() => { f.graph.genesis = 'changed'; }, TypeError);
 });
 
@@ -133,27 +142,31 @@ test('genesis binding, parent availability, claimed address and signature are al
   await assert.rejects(f.add(outsider), /unauthorized_name_key/);
   const forged = await f.make(f.genesis, f.replacement, 'forged', f.keys, { signer: f.daily.id });
   await assert.rejects(f.add(forged), /invalid_name_signature/);
-  const tampered = encode({ ...JSON.parse(new TextDecoder().decode(a.bytes)), target: target('tampered') });
+  const tampered = text(source(a.bytes).replace(/^target .*$/m, 'target ' + target('tampered')));
   await assert.rejects(f.graph.add(tampered, hash(tampered)), /invalid_name_signature/);
   assert.equal(f.graph.size, 1);
 });
 
 test('strict record encoding rejects alternate bytes, ambiguous keys and malformed input', async () => {
   const f = await fixture();
-  const original = new TextDecoder().decode(f.bytes);
-  const record = JSON.parse(original);
+  const original = source(f.bytes);
   const cases = [
     original.trimEnd(), '\ufeff' + original, original.replace('\n', '\r\n'),
-    JSON.stringify(record, null, 2) + '\n', JSON.stringify({ ...record, extra: true }) + '\n',
-    original.replace('"kind":', '"kind":"genesis","kind":'),
-    original.replace('genesis', '\\u0067enesis'),
-    JSON.stringify({ keys: record.keys, kind: record.kind, nonce: record.nonce, protocol: record.protocol }) + '\n',
+    original + '\n', original + 'extra true\n', original + 'keys ignored\n',
+    original.replace('kind genesis\n', 'kind genesis\nkind genesis\n'),
+    original.replace('kind genesis', 'kind: genesis'),
+    original.replace('kind genesis', 'kind  genesis'),
+    original.replace('kind genesis', 'kind\tgenesis'),
+    original.replace('kind genesis\n', '') + 'kind genesis\n',
+    original.replace('kind genesis\n', 'kind genesis # comment\n'),
+    original.replace('kind genesis\n', 'kind genesis\n---\n'),
   ];
   for (const source of cases) await assert.rejects(NameGraph.open(text(source), hash(text(source))), /noncanonical_name_record/);
   for (const raw of [text('null'), text('[]'), text('{'), new Uint8Array([255])])
     await assert.rejects(NameGraph.open(raw, hash(raw)));
   assert.throws(() => genesisBytes([f.daily.id, f.daily.id], 'ab'.repeat(16)), /duplicate_name_key/);
   assert.throws(() => genesisBytes([], 'ab'.repeat(16)), /invalid_name_keys/);
+  assert.throws(() => genesisBytes(new Array(1), 'ab'.repeat(16)), /invalid_name_key/);
   assert.throws(() => genesisBytes(Array(9).fill(f.daily.id), 'ab'.repeat(16)), /invalid_name_keys/);
   assert.throws(() => genesisBytes([f.daily.id.toUpperCase()], 'ab'.repeat(16)), /invalid_name_key/);
   assert.throws(() => genesisBytes(f.keys, 'not a nonce'), /invalid_name_nonce/);
@@ -166,7 +179,7 @@ test('record references and protocol versions reject noncanonical or unsupported
   const f = await fixture();
   for (const bad of ['a'.repeat(64) + '_01', 'a'.repeat(64) + '_1048577', 'A'.repeat(64) + '_1', 'not a reference'])
     await assert.rejects(f.make(f.genesis, f.daily, 'bad', f.keys, { target: bad }), /invalid_name_reference/);
-  const other = encode({ ...JSON.parse(new TextDecoder().decode(f.bytes)), protocol: 'sprig-name-draft-2' });
+  const other = text(source(f.bytes).replace(NAME_PROTOCOL, 'sprig-name-future'));
   await assert.rejects(NameGraph.open(other, hash(other)), /unsupported_name_protocol/);
 });
 

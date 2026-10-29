@@ -1,109 +1,160 @@
 # Names, signed continuations and recovery
 
-28 October 2026. **Offline design experiment, not a stable wire protocol or a
-deployed naming service.** The user-approved direction is genesis-based identity,
-single-parent signed updates, selected heads and stronger-key recovery. The exact
-encoding, stronger-prefix restriction and conflict behavior below are concrete
-draft choices made to exercise that direction.
+28 October 2026. **Offline experiments, not a stable wire protocol or a deployed
+naming service.** The agreed direction is genesis-based identity, single-parent
+signed updates, stronger-key recovery, and service arrival order with a bounded
+recovery window. The text encoding, stronger-prefix restriction and exact deadline
+boundary below are concrete draft choices made to exercise that direction.
 
 ## Objects and identities
 
 - **C:** the content blob's `sha256_length`. Source bytes remain untouched.
-- **G:** the address of a genesis record containing a protocol version, a random
-  128-bit nonce and an ordered list of Ed25519 public keys. Strongest is first.
-  The nonce permits separate names with the same initial key configuration.
-- **U:** the address of a complete signed update identifying G, one parent P, a
-  target C, its signer, and the key list in force after U. The first parent is G.
+- **G:** the address of a genesis containing a protocol version, a random 128-bit
+  nonce and ordered Ed25519 public keys, strongest first. The nonce permits
+  separate names with the same initial keys.
+- **U:** the address of a complete signed update naming G, one parent P, a target
+  C, its signer, and the key list in force after U. The first parent is G.
 
-The genesis is the trust anchor selected by the caller. It does not claim a human
-identity or need a self-referential signature. The update signature covers a
-domain-separated canonical **unsigned** payload. Hashing the final signed bytes
-then identifies U; the signature does not sign its own enclosing hash.
+Genesis is the caller's trust anchor. It does not claim a human identity or need
+a self-referential signature. An update signs a domain-separated canonical
+**unsigned** payload; hashing the complete signed bytes then identifies U.
+A valid signature establishes authorization according to a parent. It does not
+establish service acceptance, freshness, availability, safe code or ownership.
+Neither experiment fetches or executes a target.
 
-A valid signature establishes an authorized assertion according to a parent. It
-does not establish service acceptance, freshness, target availability, safe code,
-or human ownership. The model never fetches or executes a target.
+## Hashes, admission order and indexes
 
-## Priority and key changes
-
-At each parent, use that parent's ordered key list. Verify a child with the key
-it names, and remember the signer's rank in the **parent's** list.
-
-1. A key may change itself and weaker keys. The stronger prefix must remain
-   identical in position and value. A working key cannot remove its recovery
-   key, move itself above that key, or install a new key above it.
-2. The child's new key list governs children of that child. A removed key cannot
-   extend that branch. The strongest key can replace the entire list.
-3. At a fork, the child signed by the strongest parent-authorized key takes
-   precedence. A stronger sibling supersedes the entire weaker subtree, however
-   long that subtree is. A strong signature further down the weaker subtree
-   cannot repair the already superseded edge at the earlier fork.
-4. Two different children at the same strongest rank are an explicit conflict.
-   The offline resolver stops at their common parent and returns their addresses.
-   It does not choose by arrival time, lexical hash, timestamp or longest branch.
-5. Apply this rule from G onward. “Selected” always means selected from the
-   verified records supplied to this graph. An unseen stronger update may exist.
-
-Records on superseded branches remain retrievable by hash and their signatures
-remain checkable historical assertions. They are ineligible for the selected
-continuation under the stronger evidence. The model admits them as historical
-records; admission is not acceptance as the current head.
-
-| Situation | Result |
+| Layer | Contract |
 | --- | --- |
-| Working key appends to the selected tip | Forward continuation. |
-| Keeper signs a stronger child of an ancestor | Weaker sibling and descendants are superseded; report recovery. |
-| Working key tries to remove the keeper | Reject the key transition. |
-| Working key replaces itself below the keeper | New key may continue; old key cannot extend this updated branch. |
-| Two children signed at the same priority | Conflict, even if one branch is longer. |
-| A higher-priority child arrives above that conflict | It can select a different continuation. |
+| Blob | Exact immutable UTF-8 bytes at `hash_length`. |
+| Service admission | A hash associated with an immutable sequence and service timestamp. |
+| Reference index | Candidates explicitly referencing a genesis. |
+| Naming view | Apply a versioned policy to verified candidates in service order. |
 
-## Recovery changes the earlier fast-forward proposal
+The pool may contain annotations, forks and unauthorized claims as well as name
+updates. Mentioning G grants no authority. Index explicit fields of recognized
+types, with bounded work per blob. “All” means what this service has admitted and
+indexed, not a complete view of the internet.
 
-An ordinary selected-head advance can be a fast-forward. Stronger-key recovery
-can select a sibling of an earlier update, so it can change the selected ancestry
-and even shorten the selected line. An anchored reader must distinguish `same`,
-`forward`, `recovery`, and `conflict`. Applications decide whether to follow a
-recovery, ask the holder, or continue using pinned bytes; the resolver must not
-silently call recovery a descendant of the old anchor. Nothing should autorun a
-new target merely because its signature verifies.
+`NameReplay` models only the verified naming subset for one genesis. It does not
+implement the general blob admission log or reference index. Supplied sequence
+numbers may have gaps for other service admissions. Malformed records and unknown
+parents fail without reserving an order or retaining state; retry after a parent
+is a new admission. A future service must specify how this fits raw blob storage
+if children can be stored before parents. An unverified early arrival must not
+reserve naming priority, and an old blob stamp must not silently become a new
+naming admission.
 
-An exact `(U, ancestor-depth)` still has one immutable meaning. In contrast,
-“depth 17 of whatever branch the service currently selects” can change after
-recovery and must not be advertised as an immutable historical reference.
+## Authorization and the unordered graph
 
-**Proposed service design, not implemented here:** keep an append-only sequence
-of acceptance receipts, separate from publisher chain depth. A receipt names the
-selected update, the previous receipt and the reason (`advance` or `recovery`).
-Then `(service, G, receipt-sequence)` can preserve what the service selected at
-that moment, while later receipts record recovery. Hash-pinned receipts can
-travel as evidence; service signatures and identity must be specified if readers
-are to authenticate them away from the service. A service can still equivocate;
-receipts do not create global consensus.
+`src/names/model.ts` checks exact hashes, syntax, ancestry and signatures. Each
+parent's ordered keys authorize its children:
 
-This revises the earlier suggestion that a service revision number could simply
-equal publisher depth. Another possible design is a new view epoch at recovery.
-Choose one before promising numeric revision URLs. A forgotten history must not
-be recreated under the same revision labels with new meanings.
+1. A key may change itself and weaker keys, preserving the exact stronger prefix.
+   A working key cannot remove, replace or outrank its recovery key.
+2. The child's new keys govern its children. A removed key cannot extend that
+   branch; the strongest key may replace the entire list.
+3. For the **unordered graph resolver**, a stronger child at a fork supersedes the
+   weaker subtree, however long it is. A strong signature further down a losing
+   subtree cannot repair the earlier weak edge.
+4. Equal strongest-rank siblings are an explicit conflict. The graph does not
+   choose by arrival, timestamp, lexical hash or longest branch.
+5. Apply this from G onward. Selection is only from the records supplied; unseen
+   stronger records might exist. This resolver has no time/finality policy.
 
-## Historical keys and the remaining finality question
+Superseded records remain checkable historical assertions. Graph admission does
+not mean service acceptance as the head. The graph is a useful interpretation
+when no authoritative service order has been supplied.
 
-Branch-local key rotation is not universal retirement of a historical key. A
-removed key may still produce a signature referencing an ancestor where it was
-authorized. A signature does not reveal whether it was created before or after
-rotation. An old root can create an equal-priority historical fork; a historical
-recovery key can also override an earlier weaker edge, bypassing key changes
-further down that edge's subtree. The experiment intentionally exposes this.
+## Ordered replay policy
 
-There is no invented timestamp or implicit 72-hour rule here. Before public use,
-decide how a service fixes earlier choices: accepted-branch tie policy, recovery
-windows, explicit checkpoints/new trust anchors, or another clearly specified
-finality rule. Each limits some forms of historical recovery. The simple rule
-“stronger always wins at an ancestor” must not be sold as both unlimited recovery
-and complete retirement of every old recovery key.
+`src/names/replay.ts` layers `sprig-name-arrival-draft-1` over the graph verifier.
+It **does not call the unordered graph resolver** to choose its head. Starting
+at genesis, process each unique verified candidate in service admission order:
 
-An old-key conflict test is kept as a regression: future implementations must
-resolve this question deliberately rather than accidentally assuming it away.
+1. A child of the current head advances it (`advance`).
+2. Otherwise, its parent must be on the selected chain. A child of a losing or
+   superseded branch is retained but cannot change the head (`off_branch`).
+3. At an ancestor, compare the new signer's rank against the first selected child
+   being displaced, using that ancestor's keys. Equal or weaker priority leaves
+   the head unchanged (`not_stronger`). First eligible arrival wins ties.
+4. A stronger sibling replaces that child and its subtree only when admitted no
+   later than `firstDisplaced.acceptedAtMs + recoveryWindowMs` (`recovery`). A
+   later candidate is retained but has no effect (`recovery_expired`). The exact
+   boundary is inclusive. The code compares elapsed time to avoid overflowing a
+   timestamp sum. A recent descendant never renews an older edge's window.
+5. Recovery selects just this new record. Previously losing candidates never
+   become selected automatically when ancestry changes.
+
+Every verified candidate gets one history entry, including candidates that leave
+the head unchanged. Duplicates check supplied bytes and return their first entry,
+without consuming a position or refreshing a timestamp, even at capacity. That
+entry describes the original admission; use `view()` for the present head.
+
+A sequence is a positive canonical decimal string in the u64 range, compared with
+`BigInt`. Unique admissions strictly increase it; gaps are allowed, wrap is
+rejected. Service time is a nonnegative safe integer in milliseconds, nondecreasing
+in sequence order. Both are supplied by the caller simulating the authoritative
+service, never read from publisher fields or a replay machine's wall clock.
+
+The recovery duration is required, positive, and fixed when opening the history.
+The demo chooses 72 hours, inspired by PLC; this is not a production default or a
+PLC implementation. Exported histories must identify policy version and duration.
+Same records, order, timestamps and policy reproduce the same result. Independent
+services may choose different heads from the same pool.
+
+API:
+
+- `NameReplay.open(bytes, G, { genesisAdmission, recoveryWindowMs, capacity? })`.
+- `admit(bytes, U, { sequence, acceptedAtMs })` returns the admission decision.
+- `history()` returns copies of all admissions in order.
+- `view()` returns policy, duration, genesis, head, target, selected chain and last
+  processed sequence/time. It says nothing about unobserved events.
+
+One admission may be in flight. Concurrent calls fail with `name_replay_busy`
+instead of entering an unbounded queue. Caller inputs are captured before awaits;
+verification precedes the synchronous decision/history commit. Failed stamps and
+verification change neither history nor retained graph state. A real service
+still needs a global sequencer, atomic durable commits and a clock rollback policy.
+It must assign stamps at admission after verification, not when an HTTP request
+starts, and recheck eligibility against the head at that atomic commit point.
+This is an in-memory model, not a database transaction or signed-receipt protocol.
+
+## Historical selection and recovery limits
+
+Recovery may change ancestry and shorten the selected branch. The unordered graph
+reports `same`, `forward`, `recovery` or `conflict` relative to a pinned update.
+The ordered replay records the admission decision. A client following a name
+must distinguish recovery from an ordinary descendant and choose how to respond;
+a verified new target must not silently autorun.
+
+`(U, ancestor-depth)` has an immutable meaning. “Depth 17 on whatever branch the
+service selects now” can change after recovery. Each replay entry instead stores
+its sequence, time, record, decision and **head after that event**. Later recovery
+never rewrites that entry. `(service, G, sequence)` can therefore identify a past
+selection independently of chain depth. The service sequence is not a consecutive
+per-name revision count. Historical lookup endpoints are not implemented.
+
+A future service must durably retain the acceptance history, define restart and
+expiry, and decide whether to hash-chain and sign readable receipts. Hash-pinned
+signed receipts could travel as evidence, but would not prove completeness,
+freshness or consensus. Forgotten history must not be recreated under the same
+revision labels with different meanings. Operational admission history and quota
+state cannot be recovered from an unordered blob pool alone.
+
+Branch-local rotation is not universal retirement of an old key. That key can
+still sign against an ancestor where it was authorized; the signature does not
+reveal when it was made. The unordered graph exposes this as conflict/recovery.
+The ordered policy settles equal-priority ties and bounds stronger historical
+overrides. A removed root cannot replace its own equal-rank rotation at the same
+fork, but may override an earlier weak edge while that edge's window remains open.
+Key retirement therefore depends on the selected ancestry, not just the tip.
+
+Once a window closes, that earlier choice is settled under this service policy,
+even if a compromise is discovered later. Authorized normal extensions remain
+possible. This is a deliberate recovery/finality tradeoff. Service timing, order,
+availability and durable history remain assumptions; it is not unlimited account
+recovery or universal revocation of historical signatures.
 
 ## Reference vocabulary
 
@@ -113,98 +164,100 @@ resolve this question deliberately rather than accidentally assuming it away.
 | U | Exact signed assertion and parent. |
 | G | Naming identity and initial authority. |
 | `(U, depth)` | Exact ancestor on that update's line. |
-| `(service, G)` | Service-selected current head; needs freshness and recovery rules. |
-| `(service, G, receipt)` | Proposed historical service selection, not chain depth. |
+| `(service, G)` | Current service-selected head; requires freshness/recovery policy. |
+| `(service, G, sequence)` | Historical service selection; modeled offline only. |
 | `(service, petname)` | Alias in that service's namespace. |
-| `(manifest-address, path)` | An entry in an immutable project snapshot. |
+| `(manifest-address, path)` | Entry in an immutable project snapshot. |
 
-Composite references are a selector plus constraints. A selected update, expected
-genesis and expected target must agree; failure is explicit. Labels and retrieval
-hints are not secretly alternative authorities. A follow reference can retain U
-as an anchor, but must distinguish a valid recovery from forward ancestry. A
-target-content pin fixes bytes, not their continuing eligibility as a live name.
+Composite references are a selector plus constraints. Expected genesis, update
+and target must agree; mismatch fails explicitly. Labels/retrieval hints do not
+become alternative authorities. A content pin fixes bytes, not current eligibility
+as a live name. Genesis cannot point to future updates: a reverse index discovers
+candidates, while a selected-head query answers a different question. A channel
+can announce updates but cannot prove completeness or freshness.
 
-The immutable genesis cannot point to future updates. A bounded reverse index can
-discover candidate records mentioning G. A selected-head query answers a different
-question. A channel can announce updates and encourage re-resolution; its messages
-are not proof of completeness, current selection or freshness.
+## Text encoding and signing
 
-## Implemented experiment
+`sprig-name-draft-2` is a small Git-like header format: one ASCII field name, one
+space, one unquoted token, one LF. Every line, including the final one, ends with
+LF. Repeated `key` lines encode priority. For illustration, with shortened values
+that would not pass validation:
 
-`src/names/model.ts` has no Node-specific imports, service binding or network
-operation. It uses Web Crypto Ed25519 and SHA-256. Tests and the demo run in Node
-24; browser Ed25519 support and browser integration have not been tested here.
+```text
+protocol sprig-name-draft-2
+kind update
+genesis <hash_length>
+parent <hash_length>
+target <hash_length>
+signer <public-key-hex>
+key <keeper-public-key-hex>
+key <working-public-key-hex>
+signature <signature-hex>
+```
+
+Genesis order is `protocol, kind, nonce, key...`. Update order is shown above.
+This is not YAML: no tags, aliases, nesting, comments, multiline values or implicit
+typing. All currently required values are simple tokens. Unknown/repeated singleton
+fields, duplicate keys, alternate field order, extra whitespace, blank lines, BOM
+and CRLF are rejected by validation and exact re-encoding. No parser dependency.
+Draft-1 JSON is no longer accepted; this pre-release change changes record hashes.
+It does not normalize ordinary source blobs.
+
+Nonce: 16 bytes as lowercase hex. Keys: raw 32-byte Ed25519 keys as lowercase hex,
+one to eight distinct keys. Signature: 64 bytes as lowercase hex. Signing bytes
+are UTF-8 `sprig-name-draft-2/update`, LF, then the exact canonical update header
+with the final `signature` line omitted. The complete signed bytes define U.
+References use the existing store grammar and 1 MiB hard length ceiling; a target
+reference does not imply that its bytes are present or admitted.
+
+## Running the experiments
 
 ```sh
 npm run demo:names
-node --test test/names.test.mjs
+npm run demo:replay
+node --test test/names.test.mjs test/name-replay.test.mjs
 ```
 
-The demo creates a name for the existing fern, extends it with a working key,
-recovers at a fork using the keeper, installs a replacement working key, and
-rejects the retired key's attempt to extend the recovered branch. Keys are newly
-generated for each run, held in memory and never exported to disk or printed.
-Targets are hashes of actual local fern source variants, but are not uploaded.
+Both demos use fresh transient keys and real signatures, without network, file
+writes or workerd. They need Node 24. The graph demo grows a fern's history,
+recovers using the keeper, changes the working key, then rejects the retired key.
+Targets hash actual fern source variants but are not uploaded.
 
-API:
+The replay demo prints an actual text genesis and four histories: A first, B
+first, recovery at the deadline, and recovery one millisecond too late. It replays
+each recorded history and asserts identical results. Its clock is simulated.
 
-- `genesisBytes(keys, nonce)` encodes a genesis.
-- `publicKeyHex(publicKey)` encodes an Ed25519 public key.
-- `signUpdate(fields, privateKey)` signs an update, capturing fields before any
-  asynchronous operation. Graph admission still checks authorization/signature.
-- `recordAddress(bytes)` calculates its bounded exact-byte address.
-- `NameGraph.open(bytes, expectedGenesis, capacity?)` verifies a pinned genesis.
-- `graph.add(bytes, expectedUpdate)` checks exact bytes, schema, known parent,
-  genesis binding, key transition and signature before retaining an update.
-- `graph.resolve(anchor?)` returns an observed head with its relation to the
-  anchor, or an explicit conflict. Unknown anchors require fetching proof first.
-- `graph.ancestorAtDepth(U, depth)` follows retained parents from an exact update.
+The graph API is `genesisBytes`, `publicKeyHex`, `signUpdate`, `recordAddress`,
+`NameGraph.open`, `graph.add`, `graph.get`, `graph.resolve` and
+`graph.ancestorAtDepth`. `get` returns copies of verified record, depth and signer
+rank. Unknown parents fail; no orphan queue or automatic history fetching exists.
+Both modules use Web Crypto with no Node-specific imports. Browser Ed25519 and
+browser integration remain untested. Neither module is wired into Run, Publish,
+the blob Worker, channels or a production route.
 
-Records must be supplied parent-first. Unknown parents are rejected rather than
-queued. Missing branches are not inferred absent. No history is fetched, no head
-is persisted, and no service is emulated. The module is not wired into Run,
-Publish, the blob Worker, channels or any production route.
+## Resource bounds and remaining service work
 
-### Draft encoding and bounds
+Each input is at most 8 KiB; each graph/replay retains at most 256 records including
+genesis. Losing verified candidates consume capacity. Caller buffers are copied
+before awaiting. The graph rechecks capacity after verification to prevent racing
+admissions overfilling it; replay additionally allows only one in-flight admission.
+Outputs are copies. These bounds do not meter global requests, crypto CPU or a
+hosted service's lifetime growth; public admission needs those limits too.
 
-`sprig-name-draft-1` uses compact JSON with fixed field order and one trailing LF.
-Genesis order is `protocol, kind, nonce, keys`. Update order is `protocol, kind,
-genesis, parent, target, signer, keys, signature`. Unknown/duplicate fields,
-alternate field order, extra whitespace, BOM, CRLF and alternate string escapes
-are rejected by exact re-encoding comparison. This is canonical metadata only;
-it does not normalize ordinary source blobs.
-
-Nonce: 16 bytes as 32 lowercase hex digits. Keys: raw 32-byte Ed25519 public keys
-as lowercase hex, one to eight distinct keys. Signature: 64 bytes as lowercase
-hex. The signing payload is UTF-8 `sprig-name-draft-1/update`, LF, canonical JSON
-of the update with `signature` omitted, and LF. The address hashes the complete
-signed record's bytes. References use the existing store grammar and 1 MiB hard
-length ceiling; this does not imply that a target is present or admitted.
-
-Limit each input record to 8 KiB and each graph to at most 256 retained nodes,
-including genesis. Caller buffers are copied before awaiting. Capacity is checked
-again at commit after asynchronous verification, so racing admissions cannot
-overfill the graph. Re-adding an already admitted address is idempotent even when
-full. Results expose new arrays rather than internal mutable graph state.
-
-These bounds cover record processing and retained graph size, not total concurrent
-caller tasks, crypto CPU, a hosted service's lifetime growth or arbitrary network
-traffic. A public ingress still needs bounded concurrency and global admission.
-The offline graph rejects all new nodes when full, including recovery records;
-it has no eviction or recovery-reserved capacity. A public service must decide
-how recovery remains admissible under exhausted ordinary quotas. This prototype
-does not offer that availability guarantee.
-Proof completeness, checkpoints, large histories, target loading and durable
-storage are deliberately outside this experiment. This has tests, not a formal
-proof or an independent cryptographic audit.
+When full, both experiments reject new recovery records as well as ordinary
+records. There is no eviction or reserved recovery capacity. A hosted service
+must decide how recovery remains admissible under exhausted quotas. This
+prototype does not promise recovery availability, permanent history, complete
+proof discovery or checkpointing. The experiments are tested, not formally proved
+or independently cryptographically audited.
 
 ## References
 
-- [Node Web Crypto](https://nodejs.org/api/webcrypto.html): standard Ed25519 API.
+- [Node Web Crypto](https://nodejs.org/api/webcrypto.html): Ed25519 API.
 - [RFC 8032](https://www.rfc-editor.org/rfc/rfc8032.html): Ed25519 specification.
-- [IPNS](https://docs.ipfs.tech/concepts/ipns/): signed mutable pointers and the
-  distinction between validity, discovery and freshness.
-- [Git push](https://git-scm.com/docs/git-push): fast-forward ancestry. Priority
-  recovery deliberately extends beyond that rule.
-- [did:plc](https://github.com/did-method-plc/did-method-plc): recovery-key precedent;
-  this draft does not implement did:plc or claim its compatibility/finality rules.
+- [IPNS](https://docs.ipfs.tech/concepts/ipns/): mutable pointers and freshness.
+- [Git push](https://git-scm.com/docs/git-push): fast-forward ancestry; recovery
+  intentionally permits replacing an earlier selected branch.
+- [did:plc specification](https://web.plc.directory/spec/v0.1/did-plc): ordered
+  recovery keys and a 72-hour window. This draft has different encoding, crypto,
+  key-change rules and admission semantics; it is not a PLC implementation.

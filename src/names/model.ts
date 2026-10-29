@@ -1,7 +1,7 @@
 /** Offline naming experiment. See NAMING.md before using this as a protocol. */
 import { parseAddress } from '../../vendor/blob-store/src/proof.ts';
 
-export const NAME_PROTOCOL = 'sprig-name-draft-1';
+export const NAME_PROTOCOL = 'sprig-name-draft-2';
 export const NAME_LIMITS = Object.freeze({ recordBytes: 8192, keys: 8, nodes: 256 });
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -26,7 +26,7 @@ export interface Update extends UpdateFields {
   kind: 'update';
   signature: string;
 }
-type NameRecord = Genesis | Update;
+export type NameRecord = Genesis | Update;
 interface Node {
   record: NameRecord;
   depth: number;
@@ -55,7 +55,7 @@ function publicKey(value: unknown): string {
 function keys(value: unknown): string[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > NAME_LIMITS.keys)
     throw new Error('invalid_name_keys');
-  const result = value.map(publicKey);
+  const result = Array.from(value, publicKey);
   if (new Set(result).size !== result.length) throw new Error('duplicate_name_key');
   return result;
 }
@@ -73,14 +73,38 @@ function normalize(value: unknown): NameRecord {
     parent: address(r.parent), target: address(r.target), signer: publicKey(r.signer),
     keys: keys(r.keys), signature: r.signature };
 }
+function lines(record: NameRecord, signed = true): string[] {
+  const fields = [`protocol ${record.protocol}`, `kind ${record.kind}`];
+  if (record.kind === 'genesis') fields.push(`nonce ${record.nonce}`);
+  else fields.push(`genesis ${record.genesis}`, `parent ${record.parent}`,
+    `target ${record.target}`, `signer ${record.signer}`);
+  fields.push(...record.keys.map(key => `key ${key}`));
+  if (record.kind === 'update' && signed) fields.push(`signature ${record.signature}`);
+  return fields;
+}
 function encode(record: NameRecord): Uint8Array<ArrayBuffer> {
-  return encoder.encode(JSON.stringify(record) + '\n');
+  return encoder.encode(lines(record).join('\n') + '\n');
 }
 function decode(bytes: Uint8Array): NameRecord {
-  const record = normalize(JSON.parse(decoder.decode(bytes)));
+  const fields: Record<string, unknown> = Object.create(null);
+  const keyList: string[] = [];
+  const input = decoder.decode(bytes).split('\n');
+  if (input.pop() !== '') throw new Error('noncanonical_name_record');
+  for (const line of input) {
+    const match = /^([a-z]+) ([a-z0-9_-]+)$/.exec(line);
+    if (!match) throw new Error('noncanonical_name_record');
+    const name = match[1]!;
+    const value = match[2]!;
+    if (name === 'key') keyList.push(value);
+    else {
+      if (Object.hasOwn(fields, name)) throw new Error('noncanonical_name_record');
+      fields[name] = value;
+    }
+  }
+  const record = normalize({ ...fields, keys: keyList });
   const canonical = encode(record);
   // Compare bytes, not decoded text: TextDecoder otherwise accepts a UTF-8 BOM.
-  // This also rejects extra/duplicate keys, alternate escapes, order and whitespace.
+  // This also rejects unknown fields, alternate field order and whitespace.
   if (bytes.length !== canonical.length || !bytes.every((byte, i) => byte === canonical[i]))
     throw new Error('noncanonical_name_record');
   return record;
@@ -90,8 +114,7 @@ function snapshot(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   return new Uint8Array(bytes);
 }
 function signingBytes(update: Update): Uint8Array<ArrayBuffer> {
-  const { signature: _, ...unsigned } = update;
-  return encoder.encode(NAME_PROTOCOL + '/update\n' + JSON.stringify(unsigned) + '\n');
+  return encoder.encode(NAME_PROTOCOL + '/update\n' + lines(update, false).join('\n') + '\n');
 }
 
 export async function recordAddress(input: Uint8Array): Promise<string> {
@@ -124,7 +147,7 @@ export class NameGraph {
     this.#capacity = capacity;
     this.#nodes.set(genesis, { record, depth: 0, rank: -1, children: [] });
   }
-  static async open(input: Uint8Array, expectedGenesis: string, capacity = NAME_LIMITS.nodes): Promise<NameGraph> {
+  static async open(input: Uint8Array, expectedGenesis: string, capacity: number = NAME_LIMITS.nodes): Promise<NameGraph> {
     if (!Number.isInteger(capacity) || capacity < 1 || capacity > NAME_LIMITS.nodes) throw new Error('invalid_name_capacity');
     const bytes = snapshot(input);
     address(expectedGenesis);
@@ -135,6 +158,13 @@ export class NameGraph {
   }
   get genesis(): string { return this.#genesis; }
   get size(): number { return this.#nodes.size; }
+
+  /** A copy of verified evidence; service ordering is a separate interpretation. */
+  get(update: string): { record: NameRecord; depth: number; rank: number } {
+    const node = this.#nodes.get(update);
+    if (!node) throw new Error('name_record_missing');
+    return { record: { ...node.record, keys: [...node.record.keys] }, depth: node.depth, rank: node.rank };
+  }
 
   async add(input: Uint8Array, expectedUpdate: string): Promise<string> {
     const bytes = snapshot(input);

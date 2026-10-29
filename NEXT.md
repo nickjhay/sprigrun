@@ -34,18 +34,32 @@ Implemented here: a bounded **offline** TypeScript graph using real Ed25519
 signatures, exact-byte verification, stronger-key precedence, branch-local key
 rotation, explicit equal-priority conflicts, and an anchored result that tells
 the caller when recovery replaced its previous branch. Run `npm run demo:names`
-for the fern example. This needs Node 24 but no workerd, server, account, or
-network connection. It generates transient keys and does not publish or save.
+for the fern example. A second experiment, `npm run demo:replay`, applies service
+order and a fixed recovery window to the same verified evidence. First eligible
+arrival wins ties; recovery does not rewrite historical selections. Records now
+use Git-like `field value` lines with repeated `key` lines, not JSON. Both demos
+need Node 24 but no workerd, server, account or network. Keys are transient;
+nothing is published or saved.
+
+The general direction is hashes plus an admission log and bounded typed indexes:
+explicit references to a genesis form a candidate pool; validity and ordering
+rules select the naming subset and its head. The replay models only that subset,
+not the general index. Service sequence/time are separate from publisher blobs;
+identical blobs may have different service histories. Preserve the service log
+as operational state, rather than assuming an unordered pool can reconstruct it.
 
 Next steps before exposing names as a service:
 
-1. Decide recovery-key retirement/finality and how a service handles equal-key
-   forks. This local experiment is not a complete recovery protocol.
+1. Choose the deployed recovery duration and admission policy. The replay now
+   exercises first-arrival ties and time-limited historical override, including
+   retired keys and deadline boundaries. It has no production timing guarantee.
 2. Specify service acceptance receipts, revision lookup, lease expiry and restart
    behavior. Stronger-key recovery can change selected ancestry; old revision
    labels must not silently acquire new meanings.
 3. Add bounded admission, persistence, parent retrieval and HTTP read/update APIs.
    Preserve the distinction between storing a candidate and accepting a head.
+   Specify parent-before-child naming admission versus arbitrary blob order, and
+   reserve a way to recover when ordinary candidate capacity is exhausted.
 4. Add optional watch notifications. Re-read/verify the head after reconnect; a
    watch is not an archive and is not the authority for the selected value.
 5. Offer explicit **pin** and **follow** choices in the workbench. Retain a pinned
