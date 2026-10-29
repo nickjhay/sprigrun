@@ -1,5 +1,10 @@
 # Design update: sprig.run, a store, and a terminal
 
+[NEXT.md](NEXT.md) records the current naming, commons and UI plan. The standalone
+[naming experiments](NAMING.md) exercise signed parent chains, stronger-key
+recovery, and ordered replay with bounded recovery windows. They do not change
+the storage, runtime or channel contracts below.
+
 The [garden note](GARDEN.md) is our touchstone for returning from implementation to the experience of using the place. Release 0.4.1 adds a small terminal fern in self-contained and grafted forms, using the existing language and host contract.
 
 Release 0.4 introduces a retained host editor overlay, direct-run view, and full 256-bit base36 badge. [OVERLAY.md](OVERLAY.md) records this implemented slice and distinguishes it from the proposed Sprig supervisor, overlapping independently owned surfaces, init.sprig dependency editor, naming service, and durable workspace.

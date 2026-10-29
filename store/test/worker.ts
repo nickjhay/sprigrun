@@ -3,13 +3,18 @@ import service, { StoreCoordinator as Base } from '../src/index.ts';
 import type { Env } from '../src/types.ts';
 
 export class StoreCoordinator extends Base {
-  private fault: { mode: string | null };
+  private fault: { mode: string | null; gets: number; puts: number };
   constructor(ctx: DurableObjectState, env: Env) {
-    const fault = { mode: null as string | null };
+    const fault = { mode: null as string | null, gets: 0, puts: 0 };
     const bucket = env.BLOBS;
     const wrapped = new Proxy(bucket, {
       get(target, name) {
+        if (name === 'get') return async (...args: Parameters<R2Bucket['get']>) => {
+          fault.gets++;
+          return bucket.get(...args);
+        };
         if (name === 'put') return async (...args: Parameters<R2Bucket['put']>) => {
+          fault.puts++;
           const kind = args[2]?.customMetadata?.kind;
           const mode = fault.mode;
           if ((kind === 'blob' && ['before-write', 'after-write'].includes(mode ?? '')) ||
@@ -28,6 +33,7 @@ export class StoreCoordinator extends Base {
     this.fault = fault;
   }
   testFault(mode: string) { this.fault.mode = mode; }
+  testStorageCalls() { return { gets: this.fault.gets, puts: this.fault.puts }; }
   testExpire() { this.ctx.storage.sql.exec('UPDATE tickets SET expires = 1'); }
   testLegacy() {
     const row = this.ctx.storage.sql.exec<{value:string}>('SELECT value FROM control WHERE id=1').one();
@@ -50,6 +56,7 @@ export default {
       return result;
     }
     if (path === '/__test/stats') return Response.json(await store.stats());
+    if (path === '/__test/storage-calls') return Response.json(await store.testStorageCalls());
     if (path.startsWith('/__test/fault/')) {
       await store.testFault(path.slice('/__test/fault/'.length));
       return new Response('ok');

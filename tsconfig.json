@@ -5,5 +5,5 @@
     "noUncheckedIndexedAccess":true, "allowImportingTsExtensions":true,
     "resolveJsonModule":true, "skipLibCheck":true, "noEmit":true
   },
-  "include":["src/**/*.ts","vendor/**/*.ts"]
+  "include":["src/**/*.ts","shared/**/*.ts"]
 }

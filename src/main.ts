@@ -2,8 +2,8 @@ import './style.css';
 import './overlay.css';
 import { requireHashing, decodeSource, SourceDocument, INITIAL_SOURCE, WORLD_SOURCE, MAX_SOURCE_BYTES, safeName, storeOrigin, workbenchRoute, shareURL, encodeDraft, decodeDraft } from './document.ts';
 import { WorkbenchView } from './workbench-view.ts';
-import { loadSource } from '../vendor/blob-store/examples/client.ts';
-import { parseAddress } from '../vendor/blob-store/src/proof.ts';
+import { loadSource } from '../store/examples/client.ts';
+import { parseAddress } from '../store/src/proof.ts';
 import { WorkerJob } from './jobs.ts';
 import { RUN_LIMITS, OutputBuffer, runtimeURL } from './runtime-contract.ts';
 

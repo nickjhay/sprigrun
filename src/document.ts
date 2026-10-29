@@ -1,4 +1,4 @@
-import { parseAddress } from '../vendor/blob-store/src/proof.ts';
+import { parseAddress } from '../store/src/proof.ts';
 export const MAX_SOURCE_BYTES = 262144;
 export const INITIAL_SOURCE = `#!moss/1
 # A small conversation, in a small language.

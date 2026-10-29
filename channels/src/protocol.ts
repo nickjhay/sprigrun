@@ -1,3 +1,4 @@
+export { workTarget } from '../../shared/work.ts';
 // Shared browser/native wire definitions. Secrets are 32 raw random bytes,
 // encoded as lowercase hex for transport; addresses hash the raw bytes.
 export const PROTOCOL = 'sprig-channel-v1';
@@ -46,10 +47,6 @@ export function parseCursor(value: string): { epoch: string; seq: number } | nul
   const m = /^([0-9a-f]{32})_(0|[1-9][0-9]{0,15})$/.exec(value);
   if (!m || !Number.isSafeInteger(Number(m[2]))) return null;
   return { epoch: m[1]!, seq: Number(m[2]) };
-}
-export function workTarget(bits: number, perByte: number, bytes: number): string {
-  const work = (1n << BigInt(bits)) + BigInt(perByte) * BigInt(bytes);
-  return (((1n << 256n) / work) - 1n).toString(16).padStart(64, '0');
 }
 export function proofText(c: Challenge, nonce: string): string {
   return `${PROTOCOL}\n${c.id}\n${c.operation}\n${c.address}\n${c.epoch}\n${c.message_id}\n${c.digest}\n${c.bytes}\n${c.expires_at_ms}\n${c.target}\n${nonce}\n`;

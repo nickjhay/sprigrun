@@ -1,5 +1,5 @@
-import { parseAddress } from '../vendor/blob-store/src/proof.ts';
-import { loadSource } from '../vendor/blob-store/examples/client.ts';
+import { parseAddress } from '../store/src/proof.ts';
+import { loadSource } from '../store/examples/client.ts';
 import { requireHashing } from './document.ts';
 import { RUN_LIMITS } from './runtime-contract.ts';
 // One resolver per run. Every fetch uses the captured store and verifies bytes.

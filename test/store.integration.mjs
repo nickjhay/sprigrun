@@ -8,7 +8,7 @@ import { Worker } from 'node:worker_threads';
 import { build } from 'esbuild';
 import { startLocalStore } from '../scripts/local-store.mjs';
 import { seed } from '../scripts/seed.mjs';
-import { loadSource } from '../vendor/blob-store/examples/client.ts';
+import { loadSource } from '../store/examples/client.ts';
 import { SourceDocument,addressOf } from '../src/document.ts';
 import { WorkerJob } from '../src/jobs.ts';
 import { RunSession } from '../src/run-session.ts';

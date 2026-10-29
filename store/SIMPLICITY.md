@@ -91,3 +91,12 @@ restarts. The simplicity pass preserved default HTTP behavior; optional shared
 blob caching is intentionally removed. The subsequent quota update also tests
 decades of inactivity followed by sustained demand, including rolling hour/day
 admission bounds.
+
+## October 29 repository-wide pass
+
+See [SERVICES.md](../SERVICES.md) for the current review. Browser users now import
+this store's client directly, and the store and channels share the pure helpers
+in `../shared/`. Keep that directory when building either service. New publications
+try the conditional R2 PUT first; only a preexisting object needs a verifying GET.
+The pending-receipt/flush/conditional-write recovery rules are preserved. Root
+CI now includes this project's full test suite and both typecheck configurations.

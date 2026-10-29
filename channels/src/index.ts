@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { config, type Config } from './config.ts';
-import { full, refill, waitSeconds, type BucketState } from './bucket.ts';
+import { full, refill, waitSeconds, type BucketState } from '../../shared/bucket.ts';
 import { PROTOCOL, HEX256, HEX128, NONCE, unhex, randomHex, parseCursor, proofText, workTarget, type Challenge, type Batch } from './protocol.ts';
 import { HttpError, headers, json, failure, readBody, utf8 } from './http.ts';
 

@@ -1,6 +1,6 @@
 import { badgeRows } from './hash-badge.ts';
 import { type WorkbenchRoute } from './document.ts';
-import { parseAddress } from '../vendor/blob-store/src/proof.ts';
+import { parseAddress } from '../store/src/proof.ts';
 
 const el=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
 type Kind=WorkbenchRoute['kind'];
