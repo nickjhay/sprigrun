@@ -42,6 +42,8 @@ function notModified(request: Request, etag: string): boolean {
 
 async function getBlob(request: Request, env: Env, address: string, policy: Config): Promise<Response> {
   const { digest, bytes: expectedBytes } = parseAddress(address)!;
+  const admission = await coordinator(env).readable(address);
+  if (!admission.ok) throw new HttpError(admission.status, admission.error, admission.retryAfter);
   const object = await env.BLOBS.get(objectKey(address));
   if (!object) throw new HttpError(404, 'blob_not_found');
   const bytes = await verifiedBody(object, digest, expectedBytes);
@@ -74,7 +76,7 @@ async function admin(request: Request, env: Env, url: URL): Promise<Response> {
   const store = coordinator(env);
   if (url.pathname.startsWith('/admin/recovery/')) {
     const action = url.pathname.slice('/admin/recovery/'.length);
-    if (!['snapshot/begin', 'snapshot/page', 'snapshot/object', 'snapshot/end', 'restore/begin', 'restore/record', 'restore/finish'].includes(action) ||
+    if (!['snapshot/begin', 'snapshot/page', 'snapshot/object', 'snapshot/end', 'snapshot/finish', 'restore/begin', 'restore/record', 'restore/finish'].includes(action) ||
       (action.startsWith('restore/') && env.RESTORE_MODE !== '1')) throw new HttpError(404, 'not_found');
     const cap = action === 'restore/record' ? MAX_RECORD_BYTES : MAX_HEADER_BYTES;
     checkUploadHeaders(request, cap);
@@ -92,6 +94,12 @@ async function admin(request: Request, env: Env, url: URL): Promise<Response> {
     if (!match || (match[1] === 'default' && match[2] !== undefined)) throw new HttpError(400, 'invalid_proof_of_work_parameters');
     const result = await store.setProofOfWork(match[1] === 'default' ? null : Number(match[1]), match[2] === undefined ? undefined : Number(match[2]));
     return result.ok ? json(result.value) : failed(result);
+  }
+  if (url.pathname.startsWith('/admin/reclaim/')) {
+    const address = url.pathname.slice('/admin/reclaim/'.length);
+    if (!parseAddress(address)) throw new HttpError(404, 'not_found');
+    const result = await store.reclaim(address);
+    return result.ok ? json({ address, reclaimed: true }) : failed(result);
   }
   const address = url.pathname.startsWith('/admin/block/') ? url.pathname.slice('/admin/block/'.length) : '';
   if (!parseAddress(address)) throw new HttpError(404, 'not_found');

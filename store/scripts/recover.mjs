@@ -42,7 +42,7 @@ async function* lines(file, bounds) {
   } finally { stream.destroy(); }
 }
 
-export async function verify(file, bounds = budget(), visit) {
+export async function verify(file, bounds = budget(), visit, allowMissingTrailer = false) {
   let header, state, trailer;
   for await (const line of lines(file, bounds)) {
     check(!trailer, 'archive_after_trailer');
@@ -65,8 +65,9 @@ export async function verify(file, bounds = budget(), visit) {
       if (visit) await visit(record, line, header);
     }
   }
-  check(header && trailer, 'archive_incomplete');
-  return { header, chain: trailer.chain, count: trailer.count };
+  check(header && (trailer || allowMissingTrailer), 'archive_incomplete');
+  complete(header, state, state.chain);
+  return { header, chain: state.chain, count: state.count, complete: !!trailer };
 }
 
 function connection(bounds) {
@@ -121,10 +122,15 @@ export async function exportSnapshot(file, bounds = budget()) {
       }
     }
     complete(header, state, state.chain);
+    // Make every record durable before releasing the source pin. A complete
+    // trailer is written only after the coordinator's durable finish ACK.
+    await output.sync();
+    const done = await api.post('snapshot/finish', { id: header.id, count: state.count, chain: state.chain });
+    check(done.complete === true, 'invalid_snapshot_completion');
     await write({ type: 'trailer', count: state.count, chain: state.chain });
     await output.sync();
-    return { id: header.id, count: state.count, chain: state.chain, uploads_paused: true };
-  } finally { await output.close(); } // Failure deliberately leaves the source frozen.
+    return { id: header.id, count: state.count, chain: state.chain, complete: true };
+  } finally { await output.close(); } // Failure leaves an incomplete file; the snapshot pin expires or can be released.
 }
 
 export async function restoreSnapshot(file, bounds = budget()) {
@@ -148,16 +154,40 @@ export async function restoreSnapshot(file, bounds = budget()) {
   return { ...done, count: archive.count };
 }
 
+export async function finishSnapshot(file, bounds = budget()) {
+  // Accept only a complete, validated record prefix. Never invent missing data.
+  const archive = await verify(file, bounds, undefined, true);
+  if (!archive.complete) {
+    const api = connection(bounds);
+    check(api.origin === archive.header.source_origin, 'snapshot_origin_mismatch');
+    const output = await open(file, 'a');
+    try {
+      await output.sync();
+      const done = await api.post('snapshot/finish', {
+        id: archive.header.id, count: archive.count, chain: archive.chain,
+      });
+      check(done.complete === true, 'invalid_snapshot_completion');
+      await output.writeFile(JSON.stringify({ type: 'trailer', count: archive.count, chain: archive.chain }) + '\n');
+      await output.sync();
+    } finally { await output.close(); }
+  }
+  const checked = await verify(file, bounds);
+  check(equalJSON(checked, { ...archive, complete: true }), 'archive_changed');
+  return { id: archive.header.id, count: archive.count, chain: archive.chain, complete: true };
+}
+
 async function main() {
   const [command, argument, option, extra] = process.argv.slice(2);
   check(argument && !extra && (command === 'restore' ? option === '--empty-target' : option === undefined), 'usage');
   const bounds = budget();
   if (command === 'export') {
     console.log(JSON.stringify(await exportSnapshot(argument, bounds)));
-    console.log('Source remains frozen. Verify/copy the archive, release SNAPSHOT_ID, then resume separately.');
+    console.log('Source stayed writable. The archive is complete and its snapshot pin is released.');
   } else if (command === 'verify') {
     const { header, chain, count } = await verify(argument, bounds);
     console.log(JSON.stringify({ id: header.id, captured_at_ms: header.captured_at_ms, count, chain, verified: true }));
+  } else if (command === 'finish') {
+    console.log(JSON.stringify(await finishSnapshot(argument, bounds)));
   } else if (command === 'restore') {
     console.log(JSON.stringify(await restoreSnapshot(argument, bounds)));
     console.log('Target remains isolated and paused. Reconcile newer history before any deliberate cutover.');
@@ -169,8 +199,8 @@ async function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch(error => {
     console.error(error instanceof SyntaxError ? 'invalid_archive_json' : error.message);
-    console.error('recover.mjs export FILE | verify FILE | restore FILE --empty-target | release SNAPSHOT_ID');
-    console.error('No automatic resume or cutover. An interrupted export may still hold the maintenance freeze.');
+    console.error('recover.mjs export FILE | finish FILE | verify FILE | restore FILE --empty-target | release SNAPSHOT_ID');
+    console.error('No automatic cutover. An interrupted export may still hold a snapshot pin until release or expiry.');
     process.exitCode = 1;
   });
 }

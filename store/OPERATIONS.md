@@ -62,7 +62,7 @@ npx wrangler deploy --config wrangler.rehearsal.jsonc --secrets-file .dev.vars.r
 
 Keep R2 private: no public `r2.dev`/bucket domain or lifecycle deletion. Do not
 lock the live bucket against overwrites: blocking needs to replace objects with
-tombstones. The secrets file installs admin access with the first deployment.
+permanent block facts. The secrets file installs admin access with the first deployment.
 These commands create billable resources; local checks do not execute them.
 
 Set `BLOB_STORE_URL` to the exact deployed Worker origin, then:
@@ -118,7 +118,8 @@ publish/read check; the destructive rehearsal is a separate command.
   not appear as runtime exceptions. Diagnostics must omit source and credentials.
 
 The experimental store offers exact public source with no automatic expiry and
-preserves each new reservation's `submitted_at_ms` in SQLite and R2 metadata.
+preserves separate reservation/publication times and epochs in SQLite. R2 holds
+intrinsic payload metadata; it cannot reconstruct service history.
 Coordinated export/restore into fresh isolated storage is implemented and tested
 locally; see [the recovery runbook](RECOVERY.md). Keep important originals. Before
 making this the only copy, retain independently controlled backups, rehearse cloud
@@ -136,15 +137,20 @@ node --env-file=.dev.vars.rehearsal scripts/admin.mjs pow 8 2
 ```
 
 Use the production secret file for production. Raising difficulty affects new
-tickets only. Pause stops admission; reads continue. A hung storage write can
-stall queued admin calls. Then stop traffic using the hosting control plane,
+tickets only. Pause stops admission; reads continue. A hung R2 preparation no longer
+holds block/pause/barrier commits. If the metadata service itself is unavailable
+or its short queue is saturated, stop traffic using the hosting control plane,
 covering every public route, instead of queueing more calls. Reopening traffic
 is deliberate; do not automatically resume after errors.
 
-`admin.mjs block HASH_LENGTH` replaces bytes with a tombstone and has no undo
-API. A failure needs retry and verification with a network GET/HEAD, including
-`If-None-Match`. Browser copies cannot be recalled. Admin-token compromise permits
-blocking arbitrary addresses; rotate it and inspect both SQL refusals and R2.
+`admin.mjs block HASH_LENGTH` commits a permanent SQL refusal without an R2 call;
+there is no undo API. Verify a network GET/HEAD, including `If-None-Match`, returns
+410. Browser copies and already-admitted responses cannot be recalled. The private
+payload remains until `admin.mjs reclaim HASH_LENGTH`, which refuses while an active
+snapshot pins it. Expiry/finish/abort releases the pin; a late preparation can leave
+private bytes again and require another reclaim. No automatic GC exists.
+Admin-token compromise permits arbitrary blocking/reclamation; rotate it and inspect
+both SQL facts and R2. Keep independent recovery copies and suppression history.
 
 ## Code rollback is not data restoration
 

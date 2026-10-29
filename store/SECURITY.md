@@ -8,7 +8,8 @@ The October 29 [threat model](../THREATS.md) maps the critical invariants to the
 implementation and distinguishes byte integrity, recoverability and history.
 [OPERATIONS.md](OPERATIONS.md) supplies a disposable deployment rehearsal; local
 restart checks do not establish cloud recovery or bounded bills. The store
-preserves original reservation time in SQLite and R2 metadata. The coordinated
+preserves reservation, publication and block times/epochs in SQLite. R2 metadata
+is intrinsic to the payload; it cannot reconstruct service history. The coordinated
 [snapshot and restore tool](RECOVERY.md) now has a local loss/recovery drill;
 independent backup custody, newer-history reconciliation and cloud recovery
 measurement remain operational work. There is no hosted naming admission journal.
@@ -65,22 +66,42 @@ missing/corrupt storage fails closed instead of returning a receipt as availabil
 Duplicates validate the stored source policy; tightening the policy for new
 uploads does not reinterpret existing objects.
 
-The first reservation also records `submitted_at_ms` from the service clock.
-It is copied unchanged into R2 custom metadata, preserved through retries and
-tombstoning, and checked when reconciling an existing object. Old v0.5 receipts
-retain `null` for unknown time. No global sequence is allocated, and this field
-is not naming acceptance, wall-clock monotonicity or proof of when a client sent.
+Reservation, publication and block are immutable facts with separate epochs and
+service times. `submitted_at_ms` is assigned at first publication, after private
+R2 preparation. Retries preserve both reservation and publication facts. The epoch
+is assigned inside the coordinator's commit, never cached by upload Workers.
+No global per-upload sequence is allocated; these clock values are not naming
+acceptance, monotonic time or proof of when a client sent its bytes.
 
-Publication checks permanent receipt state again under the mutation lock. R2
-conditional create and serialized blocking prevent overwrites/resurrection. A
-block first writes its receipt and then replaces R2 with a fresh random tombstone.
-A failed R2 block is reported as failure and must be retried: the previous object
-may still be readable in that interval. An empty original still gets a new ETag.
+The live FIFO holds at most 32 short metadata commits. Client body reception and
+R2 awaits stay outside it. A separate eight-operation pool bounds preparations,
+including per-address waiters. Same-address retries serialize in that pool. Quota
+reservation is durable before the one conditional R2 PUT; publication rechecks
+block/pause/work state afterwards. Private bytes alone never authorize a read.
 
-Read requests fetch R2 directly and verify both address length and digest before
-returning content or 304. They also check recorded source format; raw/binary,
-missing/unknown metadata, false UTF-8 labels and corrupt data fail closed. Changing
-new-upload policy to ASCII does not invalidate previously stored valid UTF-8.
+Blocks commit refusal in SQLite with no R2 operation. All live GET/HEAD/304 requests
+consult current metadata before R2 and verify length, hash and stored encoding
+before success. An in-flight read admitted before a block can finish. Unpublished,
+blocked or incomplete-restore state fails closed. Corrupt/missing/unsupported R2
+objects fail even if their receipt claims publication. Stricter new ASCII admission
+does not invalidate an older valid UTF-8 contract.
+
+The barrier seals an epoch using maintained counters, not a receipt scan. Its
+active 24-hour cut pins only payloads published and unblocked at that epoch.
+Later blocks refuse live reads while preserving the old snapshot body. Explicit
+admin reclamation requires a permanent block and no such pin; no automatic cleanup
+is implemented. A late PUT can leave private orphan bytes after deletion, but its
+publication check cannot resurrect a blocked address. Repeat reclaim if needed.
+Expiry/abort releases the pin and makes that unfinished snapshot unusable.
+
+The exporter validates and fsyncs all records before authenticated finish. Finish
+persists its retry outcome before releasing pins; the CLI then fsyncs its trailer.
+`recover finish` handles a complete prefix after lost replies, including restart.
+A new snapshot or explicit release retires the prior finish outcome. The v2 archive
+validates exact bodies, logical facts, epoch membership, ordered checksum and totals.
+Restore requires an isolated empty target; it clears tickets, starts credit at zero
+and stays paused. Both the deployment gate and SQL session prevent partial reads.
+Newer suppression history and independent backup custody remain operational duties.
 
 The HTTP Worker is the trusted admission caller of `publish`. Durable Object RPCs
 are internal binding capabilities, not public HTTP endpoints. Do not expose the
@@ -100,9 +121,9 @@ excluded from production builds.
   and bound trials and elapsed time. They do not mutate source. The upload helper
   copies mutable input, bounds response bodies and verifies acknowledgements;
   the loader verifies exact bytes before decoding. No server-provided code runs.
-- v0.4 storage schema is rejected instead of being silently reinterpreted. v0.5
-  uses fresh Worker/DO/R2 names by default. Existing installations need a planned
-  migration preserving block records and quota history, which is not supplied.
+- Schema 3 replaces earlier undeployed local state and is checked at startup.
+  There is no migration or compatibility archive reader. Reset/reseed disposable
+  development state; never repoint an old live bucket at a fresh coordinator.
 
 ## Practical limits
 
@@ -116,7 +137,7 @@ PoW verification still costs requests and DO calls. Edge rejection still costs a
 Worker invocation when it reaches the Worker. GETs and invalid traffic are not
 bounded by the byte quota. The 100 ms CPU limit limits one invocation, not bills.
 SQL row counts are logically bounded for tickets, but database/index/internal
-metadata allocation must be measured. Permanent receipts and tombstones grow;
+metadata allocation must be measured. Permanent receipt facts grow;
 this single SQLite DO eventually reaches its 10 GB limit under sustained use.
 
 UTF-8 accepts arbitrary encoded data and is not a Sprig syntax check or moderation
@@ -124,10 +145,13 @@ filter. Runtime sandboxing and host resource limits remain necessary. A matching
 hash establishes byte identity, not execution safety. Browser/downloaded copies
 and already-running responses cannot be recalled after a block.
 
-The 10-second body deadline does not abandon in-flight R2 operations. An unresolved
-R2 write can stall the 32-operation mutation queue, including admin calls. Releasing
-its lock on a timer could permit late publication to race a block. Public reads
-remain independent; disabling the Worker route is a broader operational stop.
+The body deadline does not cancel an issued R2 operation. A hung R2 preparation
+occupies one of eight slots; same-address waiters also occupy slots. It does not
+hold the live commit queue: block, pause and barrier can still run. Flooding short
+metadata operations can exhaust that queue and require admin retry; provider-wide
+outages can still deny service. Public reads now depend on the coordinator and R2.
+The route-level emergency stop remains independent of either application's health.
+Restore may serialize R2 work, but only on its fresh isolated target.
 
 ## Validation evidence
 
@@ -137,10 +161,13 @@ attempts, wrong-address/weak/replayed proofs rejected before any body reads,
 expiry/capacity/rate bounds, persistent tickets/consumption/overrides across restart,
 new work quotations, real CLIs, and legacy-schema refusal. Previous quota, format,
 stream-buffer, corruption, block-race and ambiguous-write protections remain tested.
-The Wrangler deployment dry run passes. All nine Python pricing tests pass separately.
-Direct POST adds tests for real curl use, idempotency, timestamp preservation,
-schema migration, policy races and shared admission/storage budgets.
-No Cloudflare resource was created or deployed during this work.
+Current validation includes five strict TypeScript configurations, the repository
+suite, pricing arithmetic and a Wrangler dry run. New tests hold R2 calls across
+barriers, saturate preparation slots, block while copying, expire pins, restart
+finish/restore, reject incomplete archives and recover the fern after both local
+stores are deleted. Test-only methods never enter the production bundle. These
+checks do not establish cloud latency, provider billing or deployment safety;
+no Cloudflare resource has been created or deployed during this work.
 
 References: [DO storage](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/),
 [R2 API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/),

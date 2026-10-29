@@ -59,13 +59,8 @@ export async function readBounded(request: Request, maxBytes: number, timeoutMs:
   }
 }
 
-export function isTombstone(object: R2Object): boolean {
-  return object.customMetadata?.kind === 'blocked';
-}
-
 export async function verifiedBody(object: R2ObjectBody, digest: string, expectedBytes: number): Promise<Uint8Array> {
   try {
-    if (isTombstone(object)) throw new HttpError(410, 'blob_blocked');
     // Do not accidentally expose raw-v1 objects from the binary/grant edition.
     // Tightening admission to ASCII must still leave older UTF-8 source readable.
     const policy = object.customMetadata?.validation_policy;

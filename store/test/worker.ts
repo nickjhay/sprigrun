@@ -4,22 +4,30 @@ import type { Env } from '../src/types.ts';
 import type { Control } from '../src/state.ts';
 
 export class StoreCoordinator extends Base {
-  private fault: { mode: string | null; gets: number; puts: number };
+  private fault: { mode: string | null; gets: number; puts: number; release: (() => void) | null };
   constructor(ctx: DurableObjectState, env: Env) {
-    const fault = { mode: null as string | null, gets: 0, puts: 0 };
+    const fault = { mode: null as string | null, gets: 0, puts: 0, release: null as (() => void) | null };
     const bucket = env.BLOBS;
     const wrapped = new Proxy(bucket, {
       get(target, name) {
         if (name === 'get') return async (...args: Parameters<R2Bucket['get']>) => {
           fault.gets++;
+          if (fault.mode === 'hold-get') {
+            fault.mode = null; await new Promise<void>(resolve => { fault.release = resolve; });
+          }
           return bucket.get(...args);
         };
         if (name === 'put') return async (...args: Parameters<R2Bucket['put']>) => {
           fault.puts++;
           const kind = args[2]?.customMetadata?.kind;
           const mode = fault.mode;
-          if ((kind === 'blob' && ['before-write', 'after-write'].includes(mode ?? '')) ||
-              (kind === 'blocked' && mode === 'before-block')) {
+          if (kind === 'blob' && ['hold-write', 'hold-after-write'].includes(mode ?? '')) {
+            fault.mode = null;
+            const written = mode === 'hold-after-write' ? await bucket.put(...args) : undefined;
+            await new Promise<void>(resolve => { fault.release = resolve; });
+            return mode === 'hold-after-write' ? written! : bucket.put(...args);
+          }
+          if (kind === 'blob' && ['before-write', 'after-write'].includes(mode ?? '')) {
             fault.mode = null;
             if (mode === 'after-write') await bucket.put(...args);
             throw new Error('injected_storage_failure');
@@ -34,11 +42,17 @@ export class StoreCoordinator extends Base {
     this.fault = fault;
   }
   testFault(mode: string) { this.fault.mode = mode; }
+  testHeld() { return this.fault.release !== null; }
+  testRelease() { const release = this.fault.release; this.fault.release = null; release?.(); }
+  testExpireSnapshot() {
+    const r = this.ctx.storage.sql.exec<{value:string}>('SELECT value FROM maintenance WHERE id=1').one();
+    const state = JSON.parse(r.value); state.header.expires_at_ms = 1;
+    this.ctx.storage.sql.exec('UPDATE maintenance SET value=? WHERE id=1', JSON.stringify(state));
+  }
   testStorageCalls() { return { gets: this.fault.gets, puts: this.fault.puts }; }
   testExpire() { this.ctx.storage.sql.exec('UPDATE tickets SET expires = 1'); }
   testReceipt(address: string) { return this.ctx.storage.sql.exec('SELECT * FROM receipts WHERE address = ?', address).toArray()[0]; }
   testControl(): Control { return JSON.parse(this.ctx.storage.sql.exec<{value:string}>('SELECT value FROM control WHERE id=1').one().value); }
-  testForgetTimes() { this.ctx.storage.sql.exec('ALTER TABLE receipts DROP COLUMN submitted_at_ms'); }
   testLegacy() {
     const row = this.ctx.storage.sql.exec<{value:string}>('SELECT value FROM control WHERE id=1').one();
     this.ctx.storage.sql.exec('UPDATE control SET value=? WHERE id=1', JSON.stringify({...JSON.parse(row.value), schema:1}));
@@ -52,13 +66,15 @@ export default {
     if (path === '/__test/expire') { await store.testExpire(); return new Response('ok'); }
     if (path === '/__test/control') return Response.json(await store.testControl());
     if (path === '/__test/legacy') { await store.testLegacy(); return new Response('ok'); }
-    if (path === '/__test/forget-times') { await store.testForgetTimes(); return new Response('ok'); }
+    if (path === '/__test/held') return Response.json(await store.testHeld());
+    if (path === '/__test/release') { await store.testRelease(); return new Response('ok'); }
+    if (path === '/__test/expire-snapshot') { await store.testExpireSnapshot(); return new Response('ok'); }
     if (path.startsWith('/__test/receipt/')) return Response.json(await store.testReceipt(path.slice('/__test/receipt/'.length)));
     if (path === '/__test/probe') {
       let pulls = 0;
       const stream = new ReadableStream<Uint8Array>({ async pull(c) {
         pulls++;
-        if (request.headers.has('Test-Freeze-On-Read')) await store.recover('snapshot/begin', new TextEncoder().encode('{}'), 'https://blobs.example.test');
+        if (request.headers.has('Test-Barrier-On-Read')) await store.recover('snapshot/begin', new TextEncoder().encode('{}'), 'https://blobs.example.test');
         if (request.headers.has('Test-Pow-On-Read')) await store.setProofOfWork(1, 0);
         if (request.headers.has('Test-Body')) { c.enqueue(new TextEncoder().encode(request.headers.get('Test-Body')!)); c.close(); }
         else if (!request.headers.has('Test-Stall')) c.enqueue(new Uint8Array([65]));

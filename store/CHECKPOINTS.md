@@ -5,20 +5,16 @@
 Copying proceeds independently. There is no deployed state or archive format to
 preserve; replace the earlier design where doing so simplifies the service.
 
-This document and `experiments/checkpoint.ts` specify the proposed replacement.
-The Worker still uses the existing whole-export maintenance freeze described in
-[RECOVERY.md](RECOVERY.md). `npm run demo:checkpoint` runs the revised offline
-model with Node 24. It now allows blocks after the barrier without aborting the
-snapshot. It has no R2, disk durability, real transaction scheduler, or cloud
-latency measurement. Serialization tests model restart from committed state.
+The Worker now implements this boundary. [RECOVERY.md](RECOVERY.md) is the operator
+runbook for the v2 archive and isolated restore. `npm run demo:checkpoint` retains
+the small offline explanatory model; production integration tests additionally
+exercise real local SQLite/R2, held storage calls, restart and the fern loss drill.
+Nothing has been deployed or measured on Cloudflare yet.
 
 ## Make the commit a short metadata transaction
 
-Today an R2 PUT also makes bytes publicly readable, and the coordinator holds its
-writer queue over that network operation. Just incrementing an epoch inside this
-architecture either waits for R2 or permits visibility outside the metadata cut.
-For a barrier independent of upload latency, separate private preparation from
-public commitment:
+Public visibility is a SQLite fact, separate from private R2 preparation. The
+normal new-object path remains one R2 PUT:
 
 1. Admit the attempt, receive and verify bounded bytes. Reserve growth credit in
    durable metadata before permitting paid R2 work.
@@ -118,7 +114,7 @@ Existing browser copies remain outside the origin's recall control.
 
 **Cost/availability tradeoff:** an uncached public read adds a coordinator/metadata
 lookup before its single R2 GET. It also depends on metadata-service availability.
-This changes today's R2-only read path. Keeping that bypass while also making SQL
+This replaces the earlier R2-only read path. Keeping that bypass while also making SQL
 the sole publication/block authority would be incorrect. A second R2 serving
 projection would bring back cross-store commit/recovery work. Measure the added
 RPC cost and latency before deployment; do not hide it in the barrier estimate.
@@ -126,7 +122,7 @@ RPC cost and latency before deployment; do not hide it in the barrier estimate.
 Physical deletion respects active snapshot references. With no reference requiring
 old bytes, blocked payloads can be reclaimed separately. A late prepare can leave
 an orphan even after a delete; its publication must recheck the block and fail.
-Reconciliation cleans such private leftovers, without refunding costs repeatedly
+Explicit authenticated `POST /admin/reclaim/{address}` removes such leftovers, without refunding costs repeatedly
 or allowing a stale operation to resurrect public content. Bound preparation
 concurrency, reservation/reconciliation work, and retry charges independently of
 the short commit queue. Control commits need admission even when upload slots are
@@ -142,7 +138,7 @@ contain their old state; safe public restoration needs newer suppression history
 ## Durability and completion
 
 Persist the epoch, selected cut, bounded configuration and all facts before their
-respective ACKs. Production handles also need an unpredictable snapshot ID so a
+respective ACKs. The implementation uses an unpredictable snapshot ID so a
 restore/clone cannot accidentally reuse an old client's generation handle. An
 operation's timing is determined by the authoritative transaction, not a request's
 claimed epoch or timestamp. Crash before commit leaves an unpublished preparation;
@@ -161,23 +157,23 @@ domain. An asynchronous log copy can lose an acknowledged suffix. Decide accepta
 loss and acknowledgement durability before promising zero loss. Immutable facts
 at the origin alone do not protect against losing that origin's account.
 
-## Implementation path without legacy constraints
+## Implemented bounds and evidence
 
-1. Replace the reservation/publication/block schema and visibility boundary. Keep
-   R2 preparation outside short durable commits, with bounded in-flight work.
-2. Replace the frozen archive/export path with epoch-filtered facts, pinned payloads,
-   and resumable completion. Update the local CLI, fixtures and recovery drill to
-   the new single format. No compatibility parser or old-schema migration is needed
-   for this undeployed service; local disposable data can be reset/reseeded.
-3. Exercise delayed R2 completion across the barrier, blocks on both sides, retries,
-   restart, missing bytes, pin expiry, garbage collection races and lost ACKs. Run
-   the restore into an isolated target, then the fern end-to-end check.
-4. Measure actual cloud barrier/read latency and operation costs before deployment.
+The live commit queue holds at most 32 operations. A separate pool admits at most
+eight preparations (including same-address waiters); duplicates serialize per address.
+Client body reception is outside both. Public reads consult metadata before R2.
+The barrier and block path make no R2 calls, including when all preparation slots
+are held. Expired/finished/aborted cuts no longer pin source; physical reclamation
+is explicit, with no automatic garbage collector. An already-issued late PUT can
+leave private bytes again, requiring another reclaim, but cannot undo the block.
 
-The updated offline tests cover held preparation across the cut, prepared bytes
-remaining invisible, all 24 orderings of later publication/block/admission,
-serialized restart, pinned reclamation, first-commit idempotency and stale handles.
-They do not substitute for the SQL/R2 fault tests required by the implementation.
+The integration tests hold R2 both before and after writing while the barrier
+commits, verify epoch-filtered records after restart, race blocks/reclamation,
+interrupt export GETs, expire leases, retry completion after lost replies and run
+the isolated loss/restore drill. The offline model also covers all 24 orderings of
+later publication, block and admission events. Pricing includes the added DO read
+lookup. Cloud read latency, barrier latency and database allocation still need a
+disposable deployment measurement before relying on the operational estimates.
 
 References: [Durable Object SQLite transactions and durability](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/),
 [R2 consistency](https://developers.cloudflare.com/r2/reference/consistency/).

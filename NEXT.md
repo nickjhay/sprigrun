@@ -14,15 +14,16 @@ After the first local loss/recovery drill, the [simplicity review](SERVICES.md#r
 identifies the next decisions: logical archive facts versus deployment settings,
 recoverable suppression history before public cutover, a measured backup pause
 budget, eviction/re-upload semantics, and optional ticket-free channels when work
-is off. These are proposals; the v1 archive and channel wire protocol still apply.
+is off. The logical v2 archive and online barrier are now implemented; the channel wire
+protocol remains unchanged.
 
-The next recovery design is [a commit-only epoch barrier](store/CHECKPOINTS.md):
+The implemented recovery design is [a commit-only epoch barrier](store/CHECKPOINTS.md):
 private payload preparation stays outside short metadata commits; publication and
 blocking receive the current epoch at commit. One-way reservation/publication/block
 facts replace the earlier preimage/abort-on-block model. Live blocks hide source
 while the older cut pins its private bytes. This requires an authoritative metadata
 lookup on public reads. `npm run demo:checkpoint` exercises the revised model;
-the Worker still uses the old freeze pending integration. Nothing is deployed:
+the Worker and real local recovery drill now exercise the same boundary. Nothing is deployed:
 replace the existing schema/archive rather than adding compatibility machinery.
 
 ## Keep the foundations small
