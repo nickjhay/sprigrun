@@ -142,6 +142,60 @@ Runtime execution/memory limits are still required when using the source.
 | `GET /b/<hash_length>` | Verified source bytes or error |
 | `HEAD /b/<hash_length>` | Same verified headers, no response body |
 | `GET /` | Plain-text stats, cached for five seconds |
+| `GET /help` | Compact instructions for people and HTTP-only agents |
+
+## Help and discovery
+
+`/help` is the canonical plain-text manual: one-request upload, verified reads,
+live-limit lookup, error handling and the optional proof workflow. Root stats
+include `help /help`; errors include `help` and, when applicable,
+`retry_after_seconds` alongside `Retry-After`. Public responses advertise help,
+documentation and the API catalog through HTTP `Link` headers, exposed via CORS.
+Errors keep their original status codes.
+
+The same Worker serves these small discovery documents, without R2, Durable
+Object calls, authentication or redirects. Documentation supports GET/HEAD and
+OPTIONS and is publicly cacheable for five minutes. Help remains accessible
+when uploads are paused or store configuration is invalid. Stored source still
+uses its separate private-cache policy.
+
+| Path | Purpose and status |
+| --- | --- |
+| `/llms.txt` | Proposed Markdown documentation index; points to `/help`, live stats and discovery. |
+| `/.well-known/api-catalog` | RFC 9727 API catalog, served as `application/linkset+json` with absolute links derived from the requested origin. |
+| `/.well-known/agent-skills/index.json` | Agent Skills discovery **draft v0.2**, listing one `skill-md` artifact and its SHA-256 digest. |
+| `/.well-known/agent-skills/sprig-blob-store/SKILL.md` | The exact `/help` body with skill name/description frontmatter. Generated together with its index digest. |
+
+No installation is needed to read the instructions or call the API. These paths
+make discovery possible for clients that support or seek them; they do not make
+every assistant automatically discover, trust or install a skill. The published
+skill uses the origin supplied by the user, never a default destination for
+uploading their files. Its digest verifies bytes against the index, not publisher
+trust. User blobs are never used as service instructions or discovery metadata.
+
+Research checked 2026-10-29:
+
+- [llms.txt](https://llmstxt.org/) is a proposal, with ordinary links and HTTP
+  link relations for discovery. We keep it an index, not a second manual.
+- [RFC 9727](https://www.rfc-editor.org/rfc/rfc9727.html) defines the API catalog
+  path, link relation and Linkset representation. It can link to a human-readable
+  manual without requiring an OpenAPI schema.
+- [Cloudflare's Agent Skills discovery draft](https://github.com/cloudflare/agent-skills-discovery-rfc)
+  defines the v0.2 index and artifact digest. The
+  [Vercel Skills installer](https://github.com/vercel-labs/skills/blob/main/src/add.ts)
+  seeks `agent-skills/index.json`, with the older `skills/index.json` as a fallback.
+  We publish the current path and schema, not an invented manifest.
+- [AGENTS.md](https://agents.md/),
+  [Claude skills](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview)
+  and [Gemini CLI skills](https://geminicli.com/docs/cli/skills/) describe project
+  or installed instruction locations. Those are distinct from website discovery.
+  We do not publish copies at every client-specific path.
+- [A2A agent cards](https://a2a-protocol.org/latest/topics/agent-discovery/) describe
+  A2A servers at `/.well-known/agent-card.json`. This store does not implement A2A
+  or MCP, so it does not advertise either protocol. An OpenAPI description can be
+  added when a concrete tool-import client needs it; it is not required for curl.
+
+## Addressed upload details
 
 Issuance checks the address syntax, size cap, pause state, challenge-rate bucket,
 existing receipt and table capacity. It does not read R2, hash the source, reserve
