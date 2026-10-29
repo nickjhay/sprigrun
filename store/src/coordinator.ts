@@ -1,32 +1,12 @@
 import { DurableObject } from 'cloudflare:workers';
 import { config, type Config } from './config.ts';
-import { full, refill, waitSeconds, type BucketState } from '../../shared/bucket.ts';
+import { full, refill, waitSeconds } from '../../shared/bucket.ts';
 import { objectKey, sha256, validate, verifiedBody } from './bytes.ts';
 import { NONCE, PROTOCOL, TICKET_ID, parseAddress, proofDigest, proofPrefix, workTarget, type Challenge } from './proof.ts';
 import { failure, HttpError, type Env, type Published, type Result } from './types.ts';
+import type { Control, Receipt } from './state.ts';
+import { recovery, recoveryLocked, type RecoveryValue } from './recovery-store.ts';
 
-interface Control {
-  schema: 2;
-  paused: boolean;
-  proofOfWorkBits?: number;
-  proofOfWorkPerByte?: number;
-  long: BucketState;
-  burst: BucketState;
-  attempts: BucketState;
-  challenges: BucketState;
-  reservedBlobs: number;
-  reservedBytes: number;
-  confirmedBlobs: number;
-  confirmedBytes: number;
-  blockedAddresses: number;
-}
-interface Receipt extends Record<string, SqlStorageValue> {
-  address: string;
-  status: 'pending' | 'stored' | 'blocked';
-  bytes: number;
-  debit: number;
-  submitted_at_ms: number | null;
-}
 interface TicketRow extends Record<string, SqlStorageValue> { id: string; expires: number; value: string }
 
 /** One named object coordinates admission/writes. Public reads bypass it. */
@@ -56,6 +36,7 @@ export class StoreCoordinator extends DurableObject<Env> {
       id TEXT PRIMARY KEY, expires INTEGER NOT NULL, value TEXT NOT NULL
     )`);
     ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS ticket_expiry ON tickets(expires)');
+    ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS maintenance (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)');
     const now = Date.now();
     const initial: Control = {
       schema: 2, paused: false,
@@ -276,9 +257,14 @@ export class StoreCoordinator extends DurableObject<Env> {
     });
   }
 
+  async recover(action: string, input: Uint8Array, origin: string): Promise<Result<RecoveryValue>> {
+    return this.exclusive(() => recovery(this.ctx, this.env, this.policy, action, input, origin));
+  }
+
   async block(address: string): Promise<Result<null>> {
     if (!parseAddress(address)) return failure(400, 'invalid_address');
     return this.exclusive(async () => {
+      if (recoveryLocked(this.ctx.storage.sql)) return failure(409, 'maintenance_locked');
       this.ctx.storage.transactionSync(() => {
         const existing = this.receipt(address);
         if (existing?.status === 'blocked') return;
@@ -298,13 +284,20 @@ export class StoreCoordinator extends DurableObject<Env> {
 
   async setPaused(paused: boolean): Promise<Result<null>> {
     return this.exclusive(async () => {
-      const state = this.read(); state.paused = paused; this.save(state);
+      if (recoveryLocked(this.ctx.storage.sql) || (!paused && this.env.RESTORE_MODE !== undefined)) return failure(409, 'maintenance_locked');
+      const state = this.read(); state.paused = paused;
+      this.ctx.storage.transactionSync(() => {
+        this.save(state);
+        // Once activated, this is no longer an idempotent restore target.
+        if (!paused) this.ctx.storage.sql.exec('DELETE FROM maintenance');
+      });
       await this.ctx.storage.sync(); return { ok: true, value: null };
     });
   }
 
   async setProofOfWork(bits: number | null, perByte?: number): Promise<Result<{ proof_of_work_bits: number; proof_of_work_per_byte: number; override: boolean }>> {
     return this.exclusive(async () => {
+      if (recoveryLocked(this.ctx.storage.sql)) return failure(409, 'maintenance_locked');
       const state = this.read();
       if (bits === null) { delete state.proofOfWorkBits; delete state.proofOfWorkPerByte; }
       else {
@@ -324,7 +317,7 @@ export class StoreCoordinator extends DurableObject<Env> {
     const live = this.ctx.storage.sql.exec<{ n: number }>('SELECT count(*) AS n FROM tickets WHERE expires > ?', Date.now()).one().n;
     return {
       service: 'bounded-blob-store', protocol: PROTOCOL, hash: 'sha256', address_format: 'hash_length',
-      validation: this.policy.validationPolicy, uploads_paused: state.paused,
+      validation: this.policy.validationPolicy, uploads_paused: state.paused, maintenance_locked: recoveryLocked(this.ctx.storage.sql),
       proof_of_work_bits: state.proofOfWorkBits ?? this.policy.proofOfWorkBits,
       proof_of_work_per_byte: state.proofOfWorkPerByte ?? this.policy.proofOfWorkPerByte,
       proof_of_work_default_bits: this.policy.proofOfWorkBits,

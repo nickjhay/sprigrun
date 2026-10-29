@@ -1,7 +1,7 @@
 import test, { before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, stat } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -9,6 +9,10 @@ import { build } from 'esbuild';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Miniflare, Log, LogLevel } from 'miniflare';
+import { verify as verifyArchive, budget } from '../scripts/recover.mjs';
+import { progress, advance, complete } from '../src/recovery-format.ts';
+import { demoSources } from '../../src/examples.ts';
+import { interpret } from '../../src/moss/interpreter.ts';
 
 const TOKEN = 'a'.repeat(64);
 const digestOf = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -23,7 +27,7 @@ const BINDINGS = {
 
 before(async () => {
   await build({ entryPoints: ['test/worker.ts'], outfile: 'dist/test-worker.mjs', bundle: true,
-    format: 'esm', platform: 'neutral', external: ['cloudflare:workers', 'node:crypto'] });
+    format: 'esm', platform: 'neutral', external: ['cloudflare:workers', 'node:crypto','node:buffer'] });
 });
 
 function start(bindings = {}, persist, production = false, port) {
@@ -809,4 +813,270 @@ test('real deployment rehearsal verifies production storage across a full restar
   const verified = await run(process.execPath, ['scripts/rehearse.mjs', 'verify', stateFile, '--disposable'], options);
   assert.match(verified.stdout, /Verified after restart/);
   assert.match(await (await request(mf, '/')).text(), /uploads_paused true\n/);
+});
+
+const recover = (mf, action, data = {}, token = TOKEN) => request(mf, `/admin/recovery/${action}`, {
+  method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+  body: typeof data === 'string' ? data : JSON.stringify(data),
+});
+const control = async mf => (await request(mf, '/__test/control')).json();
+async function snapshot(mf) {
+  const begun = await recover(mf, 'snapshot/begin'); assert.equal(begun.status, 200, await begun.clone().text());
+  const header = await begun.json(), records = []; let state = progress(header);
+  for (;;) {
+    const { addresses } = await (await recover(mf, 'snapshot/page', { id: header.id, after: state.after })).json();
+    if (!addresses.length) break;
+    for (const address of addresses) {
+      const response = await recover(mf, 'snapshot/object', { id: header.id, address });
+      assert.equal(response.status, 200, await response.clone().text());
+      const record = await response.json(), line = JSON.stringify(record);
+      records.push(record); state = advance(state, record.receipt, line);
+    }
+  }
+  complete(header, state, state.chain);
+  return { header, records, chain: state.chain };
+}
+const beginRestore = (mf, s) => recover(mf, 'restore/begin', { header: s.header, chain: s.chain });
+const finishRestore = (mf, s) => recover(mf, 'restore/finish', { id: s.header.id, chain: s.chain });
+const cli = promisify(execFile);
+async function recoveryCLI(mf, ...args) {
+  return cli(process.execPath, ['scripts/recover.mjs', ...args], { timeout: 120000,
+    env: { ...process.env, BLOB_STORE_URL: (await mf.ready).origin, BLOB_STORE_ADMIN_TOKEN: TOKEN } });
+}
+
+test('snapshot freeze survives restart, excludes in-flight publication, and locks all administrative mutations', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'sprig-freeze-'));
+  let mf = start({}, dir); t.after(async () => { await mf.dispose(); await rm(dir, { recursive: true, force: true }); });
+  assert.equal((await recover(mf, 'snapshot/begin', {}, 'bad')).status, 404);
+  assert.equal((await recover(mf, 'restore/begin')).status, 404);
+  const source = 'freeze before body publication';
+  const result = await request(mf, '/__test/probe', { headers: {
+    'Test-Path': '/b', 'Test-Method': 'POST', 'Test-Body': source, 'Test-Freeze-On-Read': '1',
+  } });
+  assert.equal(result.status, 503);
+  assert.equal((await stats(mf)).reserved_blobs_total, 0);
+  const first = await snapshot(mf);
+  await mf.dispose(); mf = start({}, dir);
+  assert.deepEqual((await snapshot(mf)).header, first.header);
+  for (const path of ['pause', 'resume', 'pow/3/0', `block/${hash(source)}`])
+    assert.equal((await admin(mf, path)).status, 409, path);
+  assert.equal((await post(mf, source)).status, 503);
+  assert.equal((await issue(mf, hash(source))).status, 503);
+  assert.equal((await recover(mf, 'snapshot/end', { id: '0'.repeat(64) })).status, 400);
+  assert.equal((await recover(mf, 'snapshot/end', { id: first.header.id })).status, 200);
+  assert.equal((await post(mf, source)).status, 503);
+  assert.equal((await admin(mf, 'resume')).status, 200);
+  assert.equal((await post(mf, source)).status, 201);
+});
+
+test('a lost local store finds the fern, original history, quotas and blocks through the real recovery CLI', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'sprig-lost-fern-')), archive = join(dir, 'fern.jsonl');
+  const sourceDir = join(dir, 'lost'), targetDir = join(dir, 'found');
+  const vars = { MAX_BLOB_BYTES: '8192', MINIMUM_DEBIT_BYTES: '64', LONG_CAPACITY_BYTES: '65536', BURST_CAPACITY_BYTES: '65536' };
+  let source = start(vars, sourceDir, true), target;
+  t.after(async () => { if (source) await source.dispose(); if (target) await target.dispose(); await rm(dir, { recursive: true, force: true }); });
+  const demo = await demoSources(), originals = [demo.fernProgram, demo.fernLibrary, '\ufeff# original bytes\r\n"moss 🌿"\u0000\r\n'];
+  const submissions = new Map();
+  for (const text of originals) {
+    const response = await post(source, text); assert.equal(response.status, 201);
+    submissions.set(hash(text), (await response.json()).submitted_at_ms);
+  }
+  const blocked = 'suppressed fern note', never = hash('unseen blocked address');
+  assert.equal((await post(source, blocked)).status, 201);
+  assert.equal((await admin(source, `block/${hash(blocked)}`)).status, 200);
+  assert.equal((await admin(source, `block/${never}`)).status, 200);
+  const ticket = await (await issue(source, hash('outstanding'))).json();
+  assert.equal((await admin(source, 'pow/3/2')).status, 200);
+  const exported = await recoveryCLI(source, 'export', archive);
+  assert.match(exported.stdout, /Source remains frozen/);
+  assert.equal((await stat(archive)).mode & 0o777, 0o600);
+  await assert.rejects(recoveryCLI(source, 'export', archive), /EEXIST/);
+  const saved = await verifyArchive(archive); assert.equal(saved.count, 5);
+  const archived = await readFile(archive, 'utf8');
+  assert.ok(!archived.includes(ticket.id) && !archived.includes(TOKEN));
+  assert.ok(!archived.includes(Buffer.from(blocked).toString('base64')));
+  assert.equal((await request(source, `/b/${demo.fernProgramAddress}`)).status, 200);
+  assert.equal((await post(source, 'new source')).status, 503);
+  // Allocate the empty target while the source still owns its port, so the OS
+  // cannot reuse that origin and trip the CLI's separate-origin guard.
+  target = start({ ...vars, RESTORE_MODE: '1' }, targetDir, true);
+  await target.ready;
+  await source.dispose(); source = undefined;
+  await rm(sourceDir, { recursive: true, force: true }); // Lose R2 and SQL, not just the process.
+
+  assert.equal((await request(target, '/')).status, 503);
+  assert.equal((await request(target, '/help')).status, 200);
+  assert.match((await recoveryCLI(target, 'restore', archive, '--empty-target')).stdout, /"complete":true/);
+  assert.equal((await request(target, `/b/${demo.fernProgramAddress}`)).status, 503);
+  assert.equal((await admin(target, 'resume')).status, 409);
+  await target.dispose(); target = start({ ...vars, RESTORE_MODE: '1' }, targetDir);
+  await recoveryCLI(target, 'restore', archive, '--empty-target');
+  const restoredControl = await control(target);
+  for (const key of ['reservedBlobs', 'reservedBytes', 'confirmedBlobs', 'confirmedBytes', 'blockedAddresses', 'proofOfWorkBits', 'proofOfWorkPerByte'])
+    assert.equal(restoredControl[key], saved.header.control[key], key);
+  for (const key of ['long', 'burst', 'attempts', 'challenges']) {
+    assert.equal(restoredControl[key].tokens, 0); assert.equal(restoredControl[key].remainder, 0);
+  }
+  assert.equal((await stats(target)).outstanding_challenges, 0);
+  await target.dispose(); target = start(vars, targetDir); // Deliberate local cutover, still paused.
+  for (const text of originals) {
+    const address = hash(text), response = await request(target, `/b/${address}`);
+    assert.equal(response.status, 200); assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from(text));
+    const meta = await (await target.getR2Bucket('BLOBS')).head(`b/${address}`);
+    assert.equal(meta.customMetadata.submitted_at_ms, String(submissions.get(address)));
+    assert.equal((await receipt(target, text)).submitted_at_ms, submissions.get(address));
+  }
+  for (const address of [hash(blocked), never]) for (const method of ['GET', 'HEAD'])
+    assert.equal((await request(target, `/b/${address}`, { method, headers: { 'If-None-Match': `"sha256-${address}"` } })).status, 410);
+  assert.equal((await post(target, 'still paused')).status, 503);
+  let output = '', answers = ['Koru', '', ''];
+  const load = async address => {
+    const response = await request(target, `/b/${address}`); assert.equal(response.status, 200);
+    return new Uint8Array(await response.arrayBuffer());
+  };
+  await interpret(await load(demo.fernProgramAddress), { print: text => output += text, input: async () => answers.shift(), load });
+  assert.ok(output.endsWith('Koru is here. The morning can take its time.\n'));
+  assert.equal(answers.length, 0);
+  t.diagnostic('Lost both source databases; restored 5 receipts; the fern loaded its recovered library and unfurled.');
+});
+
+test('recovery preserves pending reservations and failed suppression, and resumes an ambiguous R2 restore write', async t => {
+  const vars = { LONG_CAPACITY_BYTES: '1024', BURST_CAPACITY_BYTES: '1024' };
+  const source = use(t, vars), dir = await mkdtemp(join(tmpdir(), 'sprig-restore-retry-'));
+  let target = start({ ...vars, RESTORE_MODE: '1' }, dir);
+  t.after(async () => { await target.dispose(); await rm(dir, { recursive: true, force: true }); });
+  const fixtures = ['pending absent', 'pending present', 'blocked old bytes'];
+  for (const [i, fault] of ['before-write', 'after-write'].entries()) {
+    await request(source, `/__test/fault/${fault}`); assert.equal((await post(source, fixtures[i])).status, 503);
+  }
+  assert.equal((await post(source, fixtures[2])).status, 201);
+  await request(source, '/__test/fault/before-block');
+  assert.equal((await admin(source, `block/${hash(fixtures[2])}`)).status, 503);
+  assert.equal((await request(source, `/b/${hash(fixtures[2])}`)).status, 200);
+  const saved = await snapshot(source);
+  assert.equal(saved.records.find(r => r.receipt.status === 'blocked').object, null);
+  assert.equal(saved.header.control.reservedBytes, 192);
+  assert.equal((await beginRestore(target, saved)).status, 200);
+  assert.equal((await finishRestore(target, saved)).status, 400);
+  let interrupted = false;
+  for (const record of saved.records) {
+    if (record.object && !interrupted) {
+      await request(target, '/__test/fault/after-write');
+      assert.equal((await recover(target, 'restore/record', record)).status, 503);
+      await target.dispose(); target = start({ ...vars, RESTORE_MODE: '1' }, dir);
+      assert.equal((await beginRestore(target, saved)).status, 200); interrupted = true;
+    }
+    assert.equal((await recover(target, 'restore/record', record)).status, 200);
+    assert.equal((await recover(target, 'restore/record', record)).status, 200);
+  }
+  assert.ok(interrupted);
+  assert.equal((await recover(target, 'restore/record', saved.records[0])).status, 400);
+  assert.equal((await finishRestore(target, saved)).status, 200);
+  await target.dispose(); target = start(vars, dir);
+  const before = await stats(target);
+  assert.equal(before.reserved_debit_bytes_total, 192); assert.equal(before.confirmed_unblocked_blobs, 0);
+  assert.equal((await request(target, `/b/${hash(fixtures[2])}`)).status, 410);
+  assert.equal((await admin(target, 'resume')).status, 200);
+  const afterRefill = async text => {
+    let result = await post(target, text);
+    if (result.status === 429) {
+      assert.equal((await result.json()).error, 'attempt_limit');
+      assert.equal(result.headers.get('Retry-After'), '1');
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      result = await post(target, text);
+    }
+    return result;
+  };
+  for (const text of fixtures.slice(0, 2)) {
+    const result = await afterRefill(text); assert.equal(result.status, 201, await result.clone().text());
+    assert.equal((await result.json()).submitted_at_ms, saved.records.find(r => r.receipt.address === hash(text)).receipt.submitted_at_ms);
+  }
+  const after = await stats(target);
+  assert.equal(after.reserved_debit_bytes_total, 192); assert.equal(after.confirmed_unblocked_blobs, 2);
+  assert.equal((await afterRefill(fixtures[2])).status, 410);
+});
+
+test('restore refuses nonempty targets, policy mismatches, tampered data and premature completion', async t => {
+  const source = use(t); assert.equal((await post(source, 'integrity')).status, 201);
+  const saved = await snapshot(source), target = use(t, { RESTORE_MODE: '1' });
+  const mismatched = use(t, { RESTORE_MODE: '1', MAX_BLOB_BYTES: '127' });
+  assert.equal((await beginRestore(mismatched, saved)).status, 400);
+  const occupied = use(t, { RESTORE_MODE: '1' });
+  await (await occupied.getR2Bucket('BLOBS')).put('unrelated', 'bytes');
+  assert.equal((await beginRestore(occupied, saved)).status, 400);
+  const blocked = use(t, { RESTORE_MODE: '1' }); await admin(blocked, `block/${hash('blocked')}`);
+  assert.equal((await beginRestore(blocked, saved)).status, 400);
+  assert.equal((await beginRestore(target, saved)).status, 200);
+  for (const change of [r => { r.object.body = Buffer.from('bad').toString('base64'); },
+    r => { r.receipt.submitted_at_ms++; }, r => { r.receipt.debit = 0; }]) {
+    const bad = structuredClone(saved.records[0]); change(bad);
+    assert.equal((await recover(target, 'restore/record', bad)).status, 400);
+  }
+  assert.equal((await finishRestore(target, saved)).status, 400);
+  const bucket = await target.getR2Bucket('BLOBS'); assert.equal((await bucket.list()).objects.length, 0);
+  const record = saved.records[0]; await bucket.put(`b/${record.receipt.address}`, 'conflicting external write');
+  assert.equal((await recover(target, 'restore/record', record)).status, 400);
+  assert.equal(await (await bucket.get(`b/${record.receipt.address}`)).text(), 'conflicting external write');
+  const typo = use(t, { RESTORE_MODE: '0' });
+  assert.equal((await post(typo, 'source')).status, 503);
+  assert.equal((await recover(typo, 'restore/begin')).status, 404);
+});
+
+test('offline archive verification rejects truncation, corruption, reordering, accounting drift and oversized lines before restore HTTP', async t => {
+  const source = use(t), dir = await mkdtemp(join(tmpdir(), 'sprig-bad-archive-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await post(source, 'one'); await post(source, 'two'); const saved = await snapshot(source);
+  const encoded = [saved.header, ...saved.records, { type: 'trailer', count: 2, chain: saved.chain }].map(r => JSON.stringify(r));
+  const variants = [encoded.slice(0, -1).join('\n') + '\n', encoded.join('\n'),
+    [encoded[0], encoded[2], encoded[1], encoded[3]].join('\n') + '\n',
+    encoded.join('\n').replace(saved.chain, '0'.repeat(64)) + '\n',
+    encoded.join('\n') + '\n{}\n', 'x'.repeat(2 * 1024 * 1024 + 1) + '\n'];
+  const drift = structuredClone(saved.header); drift.control.reservedBytes++;
+  let state = progress(drift);
+  for (const r of saved.records) state = advance(state, r.receipt, JSON.stringify(r));
+  variants.push([drift, ...saved.records, { type: 'trailer', count: 2, chain: state.chain }].map(r => JSON.stringify(r)).join('\n') + '\n');
+  for (const [i, contents] of variants.entries()) {
+    const file = join(dir, `${i}.jsonl`); await writeFile(file, contents); await assert.rejects(verifyArchive(file));
+    const result = await cli(process.execPath, ['scripts/recover.mjs', 'restore', file, '--empty-target'], {
+      env: { ...process.env, BLOB_STORE_URL: '', BLOB_STORE_ADMIN_TOKEN: '' },
+    }).catch(e => e);
+    assert.equal(result.code, 1); assert.doesNotMatch(result.stderr, /invalid_origin|missing_admin_token/);
+  }
+  const valid = join(dir, 'valid.jsonl'); await writeFile(valid, encoded.join('\n') + '\n');
+  assert.equal((await verifyArchive(valid)).count, 2);
+  await assert.rejects(verifyArchive(valid, { ...budget(), bytes: 1 }), /archive_byte_limit/);
+  await assert.rejects(verifyArchive(valid, { ...budget(), records: 1 }), /archive_record_limit/);
+});
+
+test('snapshot pagination covers every receipt once and a missing stored object prevents a complete archive', async t => {
+  const source = use(t, { MINIMUM_DEBIT_BYTES: '1', LONG_CAPACITY_BYTES: '4096', BURST_CAPACITY_BYTES: '4096' });
+  for (let i = 0; i < 129; i++) assert.equal((await post(source, `frond ${i}`)).status, 201);
+  const saved = await snapshot(source);
+  assert.equal(saved.records.length, 129);
+  assert.equal(new Set(saved.records.map(r => r.receipt.address)).size, 129);
+  const dir = await mkdtemp(join(tmpdir(), 'sprig-incomplete-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // The active header was captured through the stable test origin; release it
+  // before using the CLI's actual loopback origin for a new snapshot.
+  await recover(source, 'snapshot/end', { id: saved.header.id });
+  const bucket = await source.getR2Bucket('BLOBS');
+  await bucket.delete(`b/${saved.records[0].receipt.address}`);
+  const file = join(dir, 'incomplete.jsonl');
+  await assert.rejects(recoveryCLI(source, 'export', file), /snapshot_object_missing/);
+  await assert.rejects(verifyArchive(file), /archive_incomplete/);
+  assert.equal((await stats(source)).maintenance_locked, true);
+  const header = JSON.parse((await readFile(file, 'utf8')).split('\n')[0]);
+  await recoveryCLI(source, 'release', header.id);
+  assert.equal((await stats(source)).maintenance_locked, false);
+  assert.equal((await stats(source)).uploads_paused, true);
+});
+
+test('empty snapshots restore and unauthenticated recovery never exposes an administrative body', async t => {
+  const source = use(t), target = use(t, { RESTORE_MODE: '1' }), saved = await snapshot(source);
+  const absent = await recover(source, 'snapshot/object', { id: saved.header.id, address: hash('absent') }, 'bad');
+  assert.equal(absent.status, 404); assert.equal(absent.headers.get('Access-Control-Allow-Origin'), null);
+  assert.equal(saved.header.receipts, 0);
+  assert.equal((await beginRestore(target, saved)).status, 200);
+  assert.equal((await finishRestore(target, saved)).status, 200);
+  assert.equal((await control(target)).long.tokens, 0);
 });

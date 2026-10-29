@@ -11,12 +11,13 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit && tsc --project tsconfig.client.json --noEmit",
-    "build": "esbuild src/index.ts --bundle --format=esm --platform=neutral --external:cloudflare:workers --external:node:crypto --outfile=dist/worker.mjs",
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=neutral --external:cloudflare:workers --external:node:crypto --external:node:buffer --outfile=dist/worker.mjs",
     "test": "npm run build && node --test --test-concurrency=1 test/*.test.mjs",
     "check": "npm run typecheck && npm test && wrangler deploy --dry-run",
     "admin": "node scripts/admin.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "rehearse": "node scripts/rehearse.mjs"
+    "rehearse": "node scripts/rehearse.mjs",
+    "recover": "node scripts/recover.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261026.1",

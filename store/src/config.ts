@@ -13,7 +13,7 @@ function integer(value: string | undefined, fallback: number, min: number, max: 
   return n;
 }
 
-export function config(env: Env) {
+export function config(env: Partial<Env>) {
   const maxBytes = integer(env.MAX_BLOB_BYTES, 262144, 1, HARD_MAX_BLOB_BYTES);
   const minimumDebit = integer(env.MINIMUM_DEBIT_BYTES, 8192, 1, HARD_MAX_BLOB_BYTES);
   const longCapacity = integer(env.LONG_CAPACITY_BYTES, 209715200, 1, 2 ** 40);

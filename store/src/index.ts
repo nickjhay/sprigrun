@@ -4,6 +4,7 @@ import { checkUploadHeaders, objectKey, readBounded, verifiedBody } from './byte
 import { parseAddress, proofPrefix, TICKET_ID, NONCE } from './proof.ts';
 import { failure, HttpError, type Env, type Failure } from './types.ts';
 import { documentation, DISCOVERY_LINKS } from './help.ts';
+import { MAX_HEADER_BYTES, MAX_RECORD_BYTES } from './recovery-format.ts';
 
 export { StoreCoordinator } from './coordinator.ts';
 
@@ -71,6 +72,16 @@ async function admin(request: Request, env: Env, url: URL): Promise<Response> {
   // Disabled, unknown and unauthenticated admin routes all look absent.
   if (request.method !== 'POST' || !authorized(request, env)) throw new HttpError(404, 'not_found');
   const store = coordinator(env);
+  if (url.pathname.startsWith('/admin/recovery/')) {
+    const action = url.pathname.slice('/admin/recovery/'.length);
+    if (!['snapshot/begin', 'snapshot/page', 'snapshot/object', 'snapshot/end', 'restore/begin', 'restore/record', 'restore/finish'].includes(action) ||
+      (action.startsWith('restore/') && env.RESTORE_MODE !== '1')) throw new HttpError(404, 'not_found');
+    const cap = action === 'restore/record' ? MAX_RECORD_BYTES : MAX_HEADER_BYTES;
+    checkUploadHeaders(request, cap);
+    const input = await readBounded(request, cap, config(env).uploadTimeoutMs);
+    const result = await store.recover(action, input, url.origin);
+    return result.ok ? json(result.value) : failed(result);
+  }
   if (url.pathname === '/admin/pause' || url.pathname === '/admin/resume') {
     const paused = url.pathname === '/admin/pause';
     const result = await store.setPaused(paused);
@@ -105,6 +116,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext, url: URL
   }
   const policy = config(env);
   if (url.pathname.startsWith('/admin/')) return admin(request, env, url);
+  // Recovery is performed at a separate origin. Public reads must not expose a
+  // partly restored history. Removing this flag is an explicit deployment step.
+  if (env.RESTORE_MODE !== undefined) throw new HttpError(503, 'recovery_mode', 60);
   const address = url.pathname.startsWith('/b/') ? url.pathname.slice(3) : '';
   const blob = parseAddress(address);
   const challengeAddress = url.pathname.startsWith('/challenge/b/') ? url.pathname.slice(13) : '';

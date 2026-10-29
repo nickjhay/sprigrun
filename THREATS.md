@@ -65,7 +65,7 @@ can be pure and correct while a reordered await still breaks the protocol.
 | **P1: publication cannot overwrite existing content or a block.** Reserve durably, conditionally create, verify an existing object, then confirm. | `coordinator.publish`, `exclusive` | Duplicate/concurrent uploads, corrupt object and tombstone tests. R2 and SQLite do not share a transaction. A failure may leave an unused reservation or readable bytes before HTTP success; clients must tolerate ambiguous completion. |
 | **S1: suppression wins against concurrent publication.** Record permanent refusal, durably flush it, replace the object with a fresh tombstone, then report success. | `coordinator.block`, shared mutation lock, admin authentication | Block races, empty blobs, stale conditional writes, block failure/retry and restart tests. Until a failed tombstone write is retried, old bytes can remain readable. Success does not stop an already-running response or browser copy. |
 | **R1: bounded individual work and retained state.** Enforce body size/deadline, ticket cap/expiry, exact global mutation budgets, fixed queue bound and client solve/read limits. | `config.ts`, `bytes.ts`, `coordinator`, browser client | Fault/stream/table-cap tests. These are not a hard bill cap, a bound on every platform buffer, or a fairness guarantee. See amplification risks below. |
-| **H1: history does not change on retry, recovery or restart.** Original admission stamps and policy remain authoritative; current head is derived from them. | Future hosted naming coordinator; current `src/names/replay.ts` is an in-memory model only | Replay tests cover ties, first displaced timestamp, duplicates, exact u64 sequences and key changes. No persistent hosted journal or backup/restore implementation exists yet. |
+| **H1: history does not change on retry, recovery or restart.** Original admission stamps and policy remain authoritative; current head is derived from them. | Future hosted naming coordinator; current `src/names/replay.ts` is an in-memory model only | Replay tests cover ties, first displaced timestamp, duplicates, exact u64 sequences and key changes. No persistent hosted naming journal or naming recovery implementation exists yet. |
 
 The HTTP adapter, configuration, secret handling and deployment bindings remain
 in the trusted boundary. Moving a function into `shared/` does not reduce its
@@ -145,8 +145,10 @@ Recovery must include the control plane as well as R2 objects:
   hash stored only beside that manifest does not defend against account compromise.
 - Keep a copy outside the deletion authority being protected against. Define how
   much acknowledged data can be lost (RPO) and how long recovery may take (RTO).
-  Periodic exports cannot honestly promise zero loss between exports. RPO/RTO,
-  export tools and a restore drill are not implemented or measured yet.
+  Periodic exports cannot honestly promise zero loss between exports. The bounded
+  [export/restore tool](store/RECOVERY.md) and local loss drill now cover a consistent
+  snapshot into fresh isolated storage. Cloud RPO/RTO and reconciliation of a newer
+  suffix remain unmeasured/unimplemented.
 
 Cloudflare SQLite DOs offer 30-day point-in-time recovery; it restores the whole
 database and cannot be exercised by local Miniflare PITR. R2 durability protects
@@ -210,11 +212,19 @@ restarts the runtime and checks bytes, blocks, reservations, overrides, pause an
 ticket state. It tests persistence, **not** backup restoration, cloud PITR,
 disaster recovery, billing, the Cloudflare edge limiter or adversarial load.
 
+The separate recovery drill now deletes both local source databases, restores
+the archive into fresh resources, verifies original timestamps, accounting and
+suppression, and runs the recovered fern and its imported library. Failure tests
+cover interrupted writes, invalid archives and the durable maintenance freeze.
+See [the recovery invariant map](store/RECOVERY.md#small-trusted-boundary) for this
+additional trusted boundary. The archive checksum needs an independently trusted
+copy; no checksum can infer unknown post-snapshot blocks or admission history.
+
 Before opening the experimental store: complete the isolated cloud rehearsal,
 verify private R2/routing/admin controls, measure basic operation costs, and make
-the current lack of independent recovery clear. Before relying on it as the only
-copy of important data: implement and rehearse coordinated export/restore with a
-chosen RPO/RTO. Before hosting names: add durable admission facts and protected
+the limits of snapshot recovery clear. Before relying on it as the only copy:
+retain independently controlled backups, rehearse cloud recovery with a chosen
+RPO/RTO, and preserve/reconcile newer suppression and admission history. Before hosting names: add durable admission facts and protected
 recovery capacity. These are separate gates, not a reason to deploy all features
 at once.
 
