@@ -10,6 +10,10 @@ The separate **public, expiring channel** service from 0.3 remains included: cre
 
 The next naming and commons steps are recorded in [NEXT.md](NEXT.md); [SERVICES.md](SERVICES.md) covers the store/channel review and the next naming service boundary. Two **offline naming experiments** use readable Git-like text records and real signatures. Run `npm run demo:names` for genesis hashes, recovery and key rotation; run `npm run demo:replay` for competing arrivals and recovery just inside/outside a deadline. Both need Node 24, require no Cloudflare runtime, upload nothing, and keep temporary keys only in memory. [NAMING.md](NAMING.md) explains the draft formats, ordered history and limits. No naming service or browser naming UI is deployed.
 
+`npm run demo:paths` explores a smaller service interface: stored GET responses,
+atomic `.slot@revision` publication, shared topics, and pinned background reviews.
+See [PATHS.md](PATHS.md). This is an offline model with no Sprig VM or server.
+
 ## Run the editor on its own
 
 With Node 24 and dependencies installed, this starts the browser workbench without
@@ -28,7 +32,7 @@ ignoring a previously saved store selection; you can deliberately connect one.
 Your saved draft still opens normally. Use `-- --port 5174` for a different port.
 Ctrl+C stops the preview; restart it after source changes.
 
-The offline demos (`demo:names`, `demo:replay`, `demo:checkpoint`), `npm test` and
+The offline demos (`demo:names`, `demo:replay`, `demo:checkpoint`, `demo:paths`), `npm test` and
 `npm run typecheck` also need no Cloudflare runtime. The full `npm run dev` and
 `npm run check` below require a supported workerd platform (macOS 13.5+ for the
 pinned runtime).
