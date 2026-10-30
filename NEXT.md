@@ -10,6 +10,14 @@ storage with name acceptance in one publishing request. Keep one selected head
 plus per-record acceptance facts, a service policy constant for recovery, and
 no automatic expiry for ordinary blobs. Channels keep their separate retention.
 
+October 30 experiment: [PATHS.md](PATHS.md) explores a smaller service interface:
+GET serves committed representations; metered programs propose an append or
+conditional advance with atomic task creation/completion. `npm run demo:paths`
+exercises `.slot@revision` addresses, shared topics, retries and pinned reviews.
+"Grove" is a provisional name for the opt-in collection; "index" remains useful
+for automated reference lookup. This is an offline model, not a replacement for
+the existing Workers or a hosted Sprig runtime.
+
 After the first local loss/recovery drill, the [simplicity review](SERVICES.md#review-after-the-first-recovery-drill)
 identifies the next decisions: logical archive facts versus deployment settings,
 recoverable suppression history before public cutover, a measured backup pause
