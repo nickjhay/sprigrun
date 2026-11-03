@@ -1,7 +1,7 @@
 # Native protocol v1 candidate
 
 This is the implemented protocol slice, not a deployed service contract.
-The native SQLite/R2 acceptance layer exists; public HTTP is still ahead. Freeze public v1 semantics
+The native SQLite/R2 acceptance layer and [HTTP adapter](HTTP.md) are implemented locally. Freeze public v1 semantics
 before accepting durable public records. Older offline naming/path experiments
 use different formats and are not parsed as this protocol.
 
@@ -113,7 +113,7 @@ No username, URL normalization aliases, query, fragment or redirect is allowed.
 The HTTP adapter must preserve this boundary despite its platform URL handling.
 Offline verification can use the signed production origin without executing it.
 
-Proposed wire adapter (not implemented here): raw anonymous POSTs remain raw.
+Implemented wire adapter: raw anonymous POSTs remain raw.
 An explicit `Sprig-Signature` header selects the signed-envelope body mode;
 a missing/bad author or proof then rejects. Without that mode, a payload starting
 with an action marker is ordinary data. The adapter constructs the anonymous
@@ -221,8 +221,8 @@ no duplicates or extensions. Parsers throw small errors such as
 `invalid_metadata`, `unsupported_action_version`, `wrong_origin`,
 `noncanonical_reference`, `invalid_signature`, `wrong_plot_binding`,
 `wrong_receipt_action`, `wrong_receipt_result`, and `u64_overflow`.
-The future HTTP adapter should map these to useful plain-text status responses
-with a `/help` pointer; it must not reflect credentials or raw unsanitized headers.
+The HTTP adapter maps these to plain-text status responses with a `/help`
+pointer, without reflecting credentials or raw unsanitized headers.
 
 Frozen Ed25519 examples in `test/vectors/ed25519.json` were generated with Python
 cryptography independently of this implementation. Tests cross-check them with

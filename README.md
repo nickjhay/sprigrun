@@ -10,7 +10,11 @@ Both need only Node 24 and upload nothing. The [native SQLite/R2 acceptance laye
 now has fault and restart tests (`npm run test:acceptance`, requiring workerd).
 Whole-core backup/restore is available: `npm run demo:recovery` runs a local loss
 drill, and [the recovery guide](core/RECOVERY.md) explains the safety boundaries.
-Public HTTP and the explorer are next; the existing services below remain unchanged.
+The [native HTTP service and explorer](core/HTTP.md) now run with `npm run dev:core`
+(or `npm run dev:core -- --operator` for local read-only table inspection). Open
+http://127.0.0.1:8789/ to follow sources, publications, plots, chats, actions and
+receipts. This needs workerd; it is tested locally, not deployed. The existing
+services below remain unchanged.
 
 This release gives the workbench a small resident: **A little fern**, an ordinary Moss program you can name, unfurl in three stages, and change. A second version grafts its frond vocabulary by hash. Both are in the example menu. The [garden note](GARDEN.md) keeps our design touchstone close to the code.
 

@@ -1,19 +1,25 @@
 import { DurableObject } from 'cloudflare:workers';
 import { refill, waitSeconds } from '../../shared/bucket.ts';
-import { parseAction, type Action } from '../src/action.ts';
+import { actionBytes, parseAction, type Action } from '../src/action.ts';
 import { plotBindingBytes, verifyAction } from '../src/authority.ts';
 import { check, contentAddress, copyBytes, LIMITS, nextU64, orderedU64, parseAddress,
   textBytes, u64, utf8 } from '../src/bytes.ts';
 import { assertChatFits, canonicalOrigin, formatReference, parsePostTarget, parseReference } from '../src/references.ts';
-import { receiptBytes } from '../src/receipt.ts';
+import { parseReceipt, receiptBytes } from '../src/receipt.ts';
 import { METADATA_ALLOWANCE, policy, type Policy } from './policy.ts';
 import { State, type Control, type Entry } from './state.ts';
 import { collection, at, bodyValue } from './placement.ts';
 import { loadSource, putSource } from './objects.ts';
 import { canonical } from './archive.ts';
 import { Recovery } from './recovery.ts';
+import { Inspection, type Browse } from './inspection.ts';
+import { handleHttp } from '../http/routes.ts';
+import { body, httpPolicy, ReadGate, HttpError, uploadHeaders, urlFor, query, type HttpPolicy } from '../http/transport.ts';
 
-export interface Env { SOURCES: R2Bucket; CORE_ORIGIN: string; CORE_POLICY?: Policy; CORE_RESTORE_MODE?: string }
+export interface Env {
+  SOURCES: R2Bucket; CORE_ORIGIN: string; CORE_POLICY?: Policy; CORE_RESTORE_MODE?: string;
+  CORE_HTTP_POLICY?: HttpPolicy; ADMIN_TOKEN?: string; CORE_LOCAL_OPERATOR?: string; ABUSE_EMAIL?: string;
+}
 type Verified = { action: Action; id: string; key: string | null; binding: string | null;
   keyRecord: string | null; authorBinding: string | null; source: string | null;
   value: string | null; signature: string | null; header: string };
@@ -29,6 +35,10 @@ export class NativeCoordinator extends DurableObject<Env> {
   private readonly recovery: Recovery;
   private recovering = false;
   private exporting = 0;
+  private readonly inspection: Inspection;
+  private readonly http: HttpPolicy;
+  private readonly reads: ReadGate;
+  private operatorActive = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -36,6 +46,8 @@ export class NativeCoordinator extends DurableObject<Env> {
     this.p = policy(env.CORE_POLICY);
     this.db = new State(ctx.storage.sql, this.origin, this.p, Date.now());
     this.recovery = new Recovery(ctx, this.db, env.SOURCES, this.p);
+    this.inspection = new Inspection(this.db, p => this.readable(p), id => this.actionRecord(id), this.origin);
+    this.http = httpPolicy(env.CORE_HTTP_POLICY); this.reads = new ReadGate(this.http);
   }
   private normal() { check(this.env.CORE_RESTORE_MODE !== '1' && !this.recovery.locked(), 'recovery_mode'); }
   private transaction<T>(f: () => T): T { return this.ctx.storage.transactionSync(f); }
@@ -158,15 +170,20 @@ export class NativeCoordinator extends DurableObject<Env> {
     this.normal();
     check(input.byteLength <= LIMITS.actionBytes, 'bytes_limit');
     check(signature === null || (typeof signature === 'string' && signature.length === 86), 'invalid_signature');
-    check(this.active < 8, 'preparation_busy');
+    const bytes = copyBytes(input); // Copy caller-owned buffers before any await.
+    return this.accept(async () => ({ bytes, signature }));
+  }
+  /** Both RPC and HTTP use this one acceptance path. HTTP is admitted before body reception. */
+  private async accept(receive: () => Promise<{ bytes: Uint8Array; signature: string | null }>): Promise<string> {
+    this.normal(); check(this.active < 8, 'preparation_busy');
     this.active++;
     try {
-      const bytes = copyBytes(input);
       this.transaction(() => {
         const c = this.db.control(); check(!c.paused, 'writes_paused'); this.refresh(c);
         check(c.attempts.tokens >= 1, 'attempt_limit'); c.attempts.tokens--; this.db.save(c);
       });
       await this.ctx.storage.sync(); // No hashing, verification or R2 before admission is durable.
+      const { bytes, signature } = await receive();
       const v = await this.verify(bytes, signature);
       const existing = this.db.accepted(v.id);
       if (existing) { this.readable(existing.result); return existing.receipt; }
@@ -218,6 +235,58 @@ export class NativeCoordinator extends DurableObject<Env> {
       await this.ctx.storage.sync();
       return receipt;
     } finally { this.active--; }
+  }
+
+  async submitHttp(request: Request): Promise<string> {
+    const url = urlFor(request, this.origin); query(url, []);
+    check(request.method === 'POST', 'post_required');
+    parsePostTarget(url.pathname); const signature = request.headers.get('Sprig-Signature');
+    if (request.headers.has('Authorization') || request.headers.has('Sprig-Occurrence'))
+      throw new HttpError(400, 'unsupported_authorization');
+    if (signature !== null && !/^[A-Za-z0-9_-]{86}$/.test(signature)) throw new HttpError(403, 'invalid_signature');
+    if (request.headers.get('Content-Type')?.toLowerCase().startsWith('multipart/'))
+      throw new HttpError(415, 'send_raw_bytes');
+    // Use protocol caps here so lowering admission limits never invalidates an accepted retry.
+    const cap = signature !== null ? LIMITS.actionBytes : LIMITS.sourceBytes;
+    uploadHeaders(request, cap);
+    return this.accept(async () => {
+      const payload = await body(request, cap, this.http.uploadTimeoutMs);
+      const bytes = signature === null ? actionBytes({ destination: this.origin + url.pathname, body: payload }, this.origin) : payload;
+      const action = parseAction(bytes, this.origin);
+      if (action.destination !== this.origin + url.pathname) throw new HttpError(400, 'wrong_destination');
+      if (signature !== null && action.author === null) throw new HttpError(400, 'author_required');
+      return { bytes, signature };
+    });
+  }
+  override async fetch(request: Request): Promise<Response> {
+    return handleHttp(request, this.env, this, this.reads, async run => {
+      if (this.operatorActive >= 2) throw new HttpError(429, 'operator_busy', 1);
+      this.operatorActive++;
+      try { return await run(); } finally { this.operatorActive--; }
+    });
+  }
+  private actionRecord(id: string) {
+    parseAddress(id);
+    const row = this.db.accepted(id); check(row, 'action_unavailable');
+    this.readable(row.result);
+    const author = parseAction(textBytes(row.header), this.origin).author;
+    if (author !== null) this.readable(author);
+    const key = parseReceipt(textBytes(row.receipt), this.origin).key;
+    if (key !== null) this.readable(key);
+    return row;
+  }
+  describe(path: string) { this.normal(); return this.inspection.describe(path); }
+  describeAction(id: string) { this.normal(); return this.inspection.describeAction(id); }
+  browse(q: Browse) { this.normal(); return this.inspection.browse(q); }
+  operatorInspect(table: string, after: string) { return this.inspection.operator(table, after); }
+  operatorRecord(id: string) { parseAddress(id); const row=this.db.accepted(id); check(row,'action_unavailable'); return row; }
+  publicStats() {
+    this.normal(); const c = this.db.control(); this.refresh(c); // Projection only: no durable view counter.
+    return { origin: c.origin, epoch: c.epoch, writes_paused: c.paused, accepted_actions: c.accepted,
+      reserved_source_bytes: c.reservedBytes, accepted_debit_bytes: c.acceptedDebit,
+      growth_credit: c.growth.tokens, burst_credit: c.burst.tokens, attempt_credit: c.attempts.tokens,
+      source_limit: this.p.sourceBytes, chat_limit: this.p.chatBytes, active_uploads: this.active,
+      proof_of_work: 'not enabled' };
   }
 
   /** Trusted adapter reads. Public HTTP must still apply inert MIME/cache policy. */
