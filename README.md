@@ -8,7 +8,9 @@ and receipt-based append continuation. `npm run demo:core` runs its offline
 signature rehearsal; `npm run seed:core` shows a small candidate public planting.
 Both need only Node 24 and upload nothing. The [native SQLite/R2 acceptance layer](core/host/README.md)
 now has fault and restart tests (`npm run test:acceptance`, requiring workerd).
-Public HTTP and whole-core recovery are next; the existing services below remain unchanged.
+Whole-core backup/restore is available: `npm run demo:recovery` runs a local loss
+drill, and [the recovery guide](core/RECOVERY.md) explains the safety boundaries.
+Public HTTP and the explorer are next; the existing services below remain unchanged.
 
 This release gives the workbench a small resident: **A little fern**, an ordinary Moss program you can name, unfurl in three stages, and change. A second version grafts its frond vocabulary by hash. Both are in the example menu. The [garden note](GARDEN.md) keeps our design touchstone close to the code.
 

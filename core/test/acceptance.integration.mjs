@@ -9,6 +9,7 @@ import { actionBytes, actionId } from '../src/action.ts';
 import { contentAddress, textBytes } from '../src/bytes.ts';
 import { keyRecordBytes, signAction, verifyAction } from '../src/authority.ts';
 import { nextAppendAction, parseReceipt, receiptForAction } from '../src/receipt.ts';
+import { backup, restore } from '../scripts/recover.mjs';
 import { DEFAULT_POLICY } from '../host/policy.ts';
 
 const origin = 'https://sprig.run';
@@ -20,7 +21,7 @@ before(async () => {
   moduleCode = compiled.outputFiles[0].text;
 });
 after(async () => { await rm(scratch, { recursive: true, force: true }); });
-function start(overrides = {}, persist) {
+function start(overrides = {}, persist, restoring = false) {
   const p = { ...DEFAULT_POLICY,
     growth: { ...DEFAULT_POLICY.growth, refill: 1 },
     burst: { ...DEFAULT_POLICY.burst, refill: 1 },
@@ -30,7 +31,8 @@ function start(overrides = {}, persist) {
     workers: [{ config: { name: 'native-test', compatibilityDate: '2026-10-26',
       manifest: { mainModule: 'worker.mjs', modules: { 'worker.mjs': { type: 'esm', contents: moduleCode } } },
       exports: { TestCoordinator: { type: 'durable-object', storage: 'sqlite' } },
-      env: { CORE_ORIGIN: { type: 'text', value: origin }, CORE_POLICY: { type: 'json', value: p },
+      env: { ...(restoring ? { CORE_RESTORE_MODE: { type: 'text', value: '1' } } : {}),
+        CORE_ORIGIN: { type: 'text', value: origin }, CORE_POLICY: { type: 'json', value: p },
         SOURCES: { type: 'r2', name: 'SOURCES' },
         CORE: { type: 'durable-object', worker: 'native-test', exportName: 'TestCoordinator' } },
     } }],
@@ -318,4 +320,76 @@ test('pause blocks an in-flight commit and bounded preparation leaves operator c
   await Promise.all(pending.map(response => bad(response, 'writes_paused')));
   await good(rpc(mf, '/pause', { paused: false }));
   assert.equal(await accept(mf, act(base, 'after')), base + '/0');
+});
+
+// These operator methods only traverse the test adapter, never a public router.
+function recovery(mf) {
+  return {
+    cut: () => json(rpc(mf, '/cut')),
+    snapshotHeader: epoch => json(rpc(mf, '/snapshotHeader', { epoch })),
+    snapshotPage: (epoch, table, after) => json(rpc(mf, '/snapshotPage', { epoch, table, after })),
+    snapshotRecord: (epoch, table, key) => json(rpc(mf, '/snapshotRecord', { epoch, table, key })),
+    restoreBegin: (header, footer) => json(rpc(mf, '/restoreBegin', { header, footer })),
+    restoreRecord: (index, line) => json(rpc(mf, '/restoreRecord', { index, line })),
+    restoreFinish: () => json(rpc(mf, '/restoreFinish')),
+  };
+}
+
+test('a pre-cut paid reservation restores without an unpublished R2 body, even when it later commits', async t => {
+  const mf = use(t), value = 'between epochs', bytes = act('/sea', value);
+  await good(rpc(mf, '/hold-put'));
+  const pending = submit(mf, bytes);
+  for (let i = 0; i < 100 && (await json(rpc(mf, '/io'))).waiting !== 1; i++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal((await json(rpc(mf, '/io'))).waiting, 1);
+  const core = recovery(mf), epoch = await core.cut();
+  const page = await core.snapshotPage(epoch, 'sources', '');
+  const during = await core.snapshotRecord(epoch, 'sources', page.keys[0]);
+  assert.equal(JSON.parse(during).body, null);
+  await good(rpc(mf, '/release-put')); await good(pending);
+  assert.equal(await core.snapshotRecord(epoch, 'sources', page.keys[0]), during);
+  const file = join(scratch, 'reservation.jsonl'), saved = await backup(core, file, epoch);
+  const target = start({}, undefined, true); t.after(() => target.dispose());
+  await restore(recovery(target), file, saved.footer.chain);
+  const rows = await json(rpc(target, '/rows')), io = await json(rpc(target, '/io'));
+  assert.equal(rows.sources.length, 1); assert.equal(rows.sources[0].published_epoch, null);
+  assert.equal(rows.accepted.length, 0); assert.equal(io.puts, 0); assert.equal(io.gets, 0);
+  assert.equal((await json(rpc(target, '/stats'))).reservedBytes, '8192');
+});
+
+test('restore handles ambiguous R2 PUT and lost acknowledgements without duplicate rows or debit', async t => {
+  const mf = use(t); await garden(mf);
+  const file = join(scratch, 'ambiguous-restore.jsonl'), saved = await backup(recovery(mf), file);
+  const target = start({}, undefined, true); t.after(() => target.dispose());
+  await good(rpc(target, '/fail-put', { when: 'after' }));
+  await assert.rejects(restore(recovery(target), file, saved.footer.chain), /injected_put_ambiguous/);
+  assert.equal((await json(rpc(target, '/restoreStatus'))).count, '0');
+  assert.equal((await json(rpc(target, '/rows'))).sources.length, 0);
+  await restore(recovery(target), file, saved.footer.chain);
+  const io = await json(rpc(target, '/io'));
+  assert.equal(io.puts, 2); assert.ok(io.gets >= 1);
+  assert.equal((await json(rpc(target, '/stats'))).reservedBytes, saved.header.control.reservedBytes);
+});
+
+test('nonempty R2 blocks restore and leaves the target quarantined', async t => {
+  const mf = use(t); await garden(mf);
+  const file = join(scratch, 'bucket-guard.jsonl'), saved = await backup(recovery(mf), file);
+  const target = start({}, undefined, true); t.after(() => target.dispose());
+  await good(rpc(target, '/corrupt', { address: await contentAddress(textBytes('orphan')), body: 'orphan' }));
+  await assert.rejects(restore(recovery(target), file, saved.footer.chain), /restore_requires_empty_bucket/);
+  assert.equal((await json(rpc(target, '/restoreStatus'))).phase, 'starting');
+  await bad(rpc(target, '/pause', { paused: false }), 'recovery_mode');
+});
+
+test('recovery preserves allocation gaps and exact u64 numbers beyond JavaScript precision', async t => {
+  const mf = use(t), publication = await garden(mf), base = '/chat' + publication;
+  await good(rpc(mf, '/head', { collection: base, number: '9007199254740992' }));
+  const result = await accept(mf, act(base, 'large'));
+  const file = join(scratch, 'large-number.jsonl'), saved = await backup(recovery(mf), file);
+  const target = start({}, undefined, true); t.after(() => target.dispose());
+  await restore(recovery(target), file, saved.footer.chain);
+  const rows = await json(rpc(target, '/rows'));
+  const entry = rows.entries.find(e => e.path === result);
+  assert.equal(entry.number, '00009007199254740993');
+  assert.equal(rows.heads.find(h => h.collection === base).number, entry.number);
 });

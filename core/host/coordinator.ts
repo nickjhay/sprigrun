@@ -4,27 +4,19 @@ import { parseAction, type Action } from '../src/action.ts';
 import { plotBindingBytes, verifyAction } from '../src/authority.ts';
 import { check, contentAddress, copyBytes, LIMITS, nextU64, orderedU64, parseAddress,
   textBytes, u64, utf8 } from '../src/bytes.ts';
-import { assertChatFits, canonicalOrigin, formatReference, parsePostTarget, parseReference,
-  type PostTarget } from '../src/references.ts';
+import { assertChatFits, canonicalOrigin, formatReference, parsePostTarget, parseReference } from '../src/references.ts';
 import { receiptBytes } from '../src/receipt.ts';
 import { METADATA_ALLOWANCE, policy, type Policy } from './policy.ts';
 import { State, type Control, type Entry } from './state.ts';
+import { collection, at, bodyValue } from './placement.ts';
+import { loadSource, putSource } from './objects.ts';
+import { canonical } from './archive.ts';
+import { Recovery } from './recovery.ts';
 
-export interface Env { SOURCES: R2Bucket; CORE_ORIGIN: string; CORE_POLICY?: Policy }
+export interface Env { SOURCES: R2Bucket; CORE_ORIGIN: string; CORE_POLICY?: Policy; CORE_RESTORE_MODE?: string }
 type Verified = { action: Action; id: string; key: string | null; binding: string | null;
   keyRecord: string | null; authorBinding: string | null; source: string | null;
   value: string | null; signature: string | null; header: string };
-const sourceKey = (address: string) => 'native/sea/' + address;
-
-function collection(target: Exclude<PostTarget, { kind: 'sea' }>): string {
-  switch (target.kind) {
-    case 'grove': return '/grove/' + target.topic.join('/');
-    case 'plot': return '/plot/' + target.handle;
-    case 'publication': return formatReference(target.plot) + '/' + target.topic.join('/');
-    case 'chat': return '/chat' + formatReference(target.subject);
-  }
-}
-function at(c: string, kind: string, n: string) { return c + (kind === 'chat' ? '/' : '.') + n; }
 
 /** Trusted RPC only. No public router or admin credential handling in this slice.
  * R2 is private; presence of an object is never proof of accepted publication.
@@ -34,13 +26,18 @@ export class NativeCoordinator extends DurableObject<Env> {
   private readonly p: Policy;
   private readonly origin: string;
   private active = 0;
+  private readonly recovery: Recovery;
+  private recovering = false;
+  private exporting = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.origin = canonicalOrigin(env.CORE_ORIGIN);
     this.p = policy(env.CORE_POLICY);
     this.db = new State(ctx.storage.sql, this.origin, this.p, Date.now());
+    this.recovery = new Recovery(ctx, this.db, env.SOURCES, this.p);
   }
+  private normal() { check(this.env.CORE_RESTORE_MODE !== '1' && !this.recovery.locked(), 'recovery_mode'); }
   private transaction<T>(f: () => T): T { return this.ctx.storage.transactionSync(f); }
   private refresh(c: Control) {
     const now = Date.now();
@@ -73,6 +70,7 @@ export class NativeCoordinator extends DurableObject<Env> {
     return entry;
   }
   private conditions(v: Verified) {
+    this.normal();
     const a = v.action, t = a.target;
     if (a.author !== null) this.readable(a.author);
     if (v.key !== null) this.readable(v.key);
@@ -88,25 +86,11 @@ export class NativeCoordinator extends DurableObject<Env> {
       check(this.db.entry(at(collection(t), t.kind, t.anchor)), 'anchor_unavailable');
   }
   private async loadSource(address: string): Promise<Uint8Array<ArrayBuffer>> {
-    // A smaller future upload limit does not make old admitted values unreadable.
-    const expected = parseAddress(address, LIMITS.sourceBytes);
-    const object = await this.env.SOURCES.get(sourceKey(address));
-    check(object && object.size === expected.length, 'source_storage_unavailable');
-    const bytes = new Uint8Array(await object.arrayBuffer());
-    check(await contentAddress(bytes) === address, 'source_integrity_failure');
-    return bytes;
+    return loadSource(this.env.SOURCES, address);
   }
   private async verify(bytes: Uint8Array, signature: string | null): Promise<Verified> {
     const action = parseAction(bytes, this.origin);
-    const target = action.target;
-    let value: string | null = null;
-    if (target.kind === 'plot') check(action.body.length === 0, 'plot_body_must_be_empty');
-    if (target.kind === 'grove' || target.kind === 'publication') {
-      check(action.body.length <= LIMITS.path + 1, 'invalid_publication_body');
-      value = utf8(action.body).slice(0, -1);
-      check(utf8(action.body) === value + '\n' && parseReference(value).kind === 'sea',
-        'invalid_publication_body');
-    }
+    const target = action.target, value = bodyValue(action);
     let keyRecord: string | null = null, authorBinding: string | null = null;
     let key: string | null = null, binding: string | null = null;
     let id: string;
@@ -163,12 +147,7 @@ export class NativeCoordinator extends DurableObject<Env> {
     });
     await this.ctx.storage.sync();
     if (source.published_epoch !== null) return;
-    const { digest } = parseAddress(address);
-    const written = await this.env.SOURCES.put(sourceKey(address), v.action.body, {
-      onlyIf: new Headers({ 'If-None-Match': '*' }), sha256: digest,
-      customMetadata: { kind: 'source', sha256: digest },
-    });
-    if (!written) await this.loadSource(address); // Ambiguous/prior PUT: verify exact bytes.
+    await putSource(this.env.SOURCES, address, v.action.body);
   }
 
   /** Test subclasses can pause preparation or throw within the real transaction. */
@@ -176,6 +155,7 @@ export class NativeCoordinator extends DurableObject<Env> {
   protected committing(): void {}
 
   async submit(input: Uint8Array, signature: string | null = null): Promise<string> {
+    this.normal();
     check(input.byteLength <= LIMITS.actionBytes, 'bytes_limit');
     check(signature === null || (typeof signature === 'string' && signature.length === 86), 'invalid_signature');
     check(this.active < 8, 'preparation_busy');
@@ -242,6 +222,7 @@ export class NativeCoordinator extends DurableObject<Env> {
 
   /** Trusted adapter reads. Public HTTP must still apply inert MIME/cache policy. */
   async read(path: string): Promise<Uint8Array<ArrayBuffer>> {
+    this.normal();
     const entry = this.readable(path), ref = parseReference(path);
     if (ref.kind === 'sea') {
       const bytes = await this.loadSource(ref.address); this.readable(path); return bytes;
@@ -252,6 +233,7 @@ export class NativeCoordinator extends DurableObject<Env> {
     return textBytes(accepted.body!);
   }
   latest(path: string): string {
+    this.normal();
     const target = parsePostTarget(path);
     check(target.kind !== 'sea' && target.anchor === null, 'collection_required');
     const head = this.db.sql.exec<{ number: string }>('SELECT number FROM heads WHERE collection=?', collection(target)).toArray()[0];
@@ -260,6 +242,7 @@ export class NativeCoordinator extends DurableObject<Env> {
     this.readable(result); return result; // Never fall back behind a suppressed head.
   }
   async evidence(id: string) {
+    this.normal();
     parseAddress(id);
     const row = this.db.accepted(id); check(row, 'action_unavailable');
     this.readable(row.result);
@@ -279,6 +262,7 @@ export class NativeCoordinator extends DurableObject<Env> {
 
   /** Operator methods: never forward these directly from unauthenticated HTTP. */
   async suppress(path: string, suppressed: boolean): Promise<void> {
+    this.normal();
     const ref = parseReference(path); check(typeof suppressed === 'boolean', 'invalid_suppression');
     check(ref.kind === 'sea' || this.db.entry(path), 'entry_unavailable');
     this.transaction(() => {
@@ -291,17 +275,36 @@ export class NativeCoordinator extends DurableObject<Env> {
     await this.ctx.storage.sync();
   }
   async pause(paused: boolean): Promise<void> {
+    this.normal();
     check(typeof paused === 'boolean', 'invalid_pause');
     this.transaction(() => { const c = this.db.control(); c.paused = paused; this.db.save(c); });
     await this.ctx.storage.sync();
   }
   /** The cut is constant-size. Pending R2 work will publish in the next epoch. */
   async cut(): Promise<string> {
+    this.normal();
     const epoch = this.transaction(() => {
       const c = this.db.control(), old = c.epoch;
-      this.db.sql.exec('INSERT INTO cuts VALUES (?, ?, ?)', orderedU64(old), JSON.stringify(c), String(Date.now()));
+      this.db.sql.exec('INSERT INTO cuts VALUES (?, ?, ?)', orderedU64(old), canonical({ ...c, _policy: this.p }), String(Date.now()));
       c.epoch = nextU64(c.epoch); this.db.save(c); return old;
     });
     await this.ctx.storage.sync(); return epoch;
   }
+  snapshotHeader(epoch: string) { this.normal(); return this.recovery.header(epoch); }
+  snapshotPage(epoch: string, table: string, after: string) { this.normal(); return this.recovery.page(epoch, table, after); }
+  async snapshotRecord(epoch: string, table: string, key: string) {
+    this.normal(); check(this.exporting < 2, 'snapshot_busy'); this.exporting++;
+    try { return await this.recovery.record(epoch, table, key); } finally { this.exporting--; }
+  }
+  private async restoring<T>(operation: () => Promise<T>): Promise<T> {
+    check(this.env.CORE_RESTORE_MODE === '1', 'restore_mode_required');
+    check(!this.recovering && this.active === 0, 'restore_busy');
+    this.recovering = true;
+    try { return await operation(); } finally { this.recovering = false; }
+  }
+  restoreStatus() { return this.recovery.status(); }
+  restoreBegin(header: string, footer: string) { return this.restoring(() => this.recovery.begin(header, footer)); }
+  restoreRecord(index: string, line: string) { return this.restoring(() => this.recovery.importRecord(index, line)); }
+  restoreFinish() { return this.restoring(() => this.recovery.finish()); }
+  restoreRelease(chain: string, confirmation: string) { return this.restoring(() => this.recovery.release(chain, confirmation)); }
 }
