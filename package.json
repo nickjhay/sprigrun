@@ -12,9 +12,9 @@
     "dev": "node scripts/dev.mjs",
     "predev:ui": "node scripts/check-node.mjs",
     "dev:ui": "node scripts/dev.mjs --ui-only",
-    "typecheck": "tsc --noEmit && tsc -p store/tsconfig.json --noEmit && tsc -p store/tsconfig.client.json --noEmit && tsc -p channels/tsconfig.json --noEmit && tsc -p channels/tsconfig.client.json --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p store/tsconfig.json --noEmit && tsc -p store/tsconfig.client.json --noEmit && tsc -p channels/tsconfig.json --noEmit && tsc -p channels/tsconfig.client.json --noEmit && tsc -p core/tsconfig.json --noEmit",
     "test": "node --test test/*.test.mjs",
-    "check": "npm run typecheck && npm test && npm run test:store && npm run test:channels && npm run test:pricing && npm run build",
+    "check": "npm run typecheck && npm run test:core && npm test && npm run test:store && npm run test:channels && npm run test:pricing && npm run build",
     "test:store": "npm --prefix store test && node --test test/store.integration.mjs",
     "seed": "node scripts/seed.mjs",
     "predemo:names": "node scripts/check-node.mjs",
@@ -26,7 +26,10 @@
     "predemo:paths": "node scripts/check-node.mjs",
     "demo:paths": "node scripts/path-garden.mjs",
     "test:channels": "node --test --test-concurrency=1 channels/test/*.test.mjs",
-    "test:pricing": "cd store && python3 -m unittest discover -s test -p 'test_*.py'"
+    "test:pricing": "cd store && python3 -m unittest discover -s test -p 'test_*.py'",
+    "test:core": "node --test core/test/*.test.mjs",
+    "demo:core": "node core/scripts/demo.mjs",
+    "seed:core": "node core/scripts/seeds.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261026.1",

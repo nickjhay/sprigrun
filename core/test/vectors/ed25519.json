@@ -1,0 +1,22 @@
+{
+  "warning": "PUBLIC TEST KEY. Never use for a seed identity or production authority.",
+  "generator": "Python cryptography Ed25519, independent of core/src",
+  "private_seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "key_record": "#!sprig.run/spec/key/1\nalgorithm: ed25519\npublic-key: A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\n",
+  "key_reference": "/sea/88f5098b99bf3ea64ad486b5bc3deb17f7de62b5035678546916d1649fd5bced_98",
+  "plot_binding": "#!sprig.run/spec/plot/1\norigin: https://sprig.run\nplot: /plot/vector.0\nkey: /sea/88f5098b99bf3ea64ad486b5bc3deb17f7de62b5035678546916d1649fd5bced_98\n",
+  "plot_binding_id": "77f71d9b74f8ca5c41a28fd569ee496292792637cd416edb4a04d4f1a7cc3e23_149",
+  "cases": [
+    {
+      "action": "#!sprig.run/spec/action/1\nauthor: /sea/88f5098b99bf3ea64ad486b5bc3deb17f7de62b5035678546916d1649fd5bced_98\n\nPOST https://sprig.run/chat/grove/fern.7/12\n\nHello from the fern. 🌿\n",
+      "id": "ff288d1d9df6606027b423ed966e1005c4d0f357a4c7fc20ebeecb4a7451729c_179",
+      "signature": "OikDwf3_3n0XckKIlj2FB9YdUY0CuUOu327-G9nXxOlprSU53eVNdM8m9KW8BVpjS0QrOMRbiIBtxxVMdsNvBA"
+    },
+    {
+      "action": "#!sprig.run/spec/action/1\nauthor: /plot/vector.0\n\nPOST https://sprig.run/chat/grove/fern.7/12\n\nHello from the fern. 🌿\n",
+      "id": "8143f9bf8f6132a613e6137203e9aa7e963af2f9472fd20be95a8be31d1989db_121",
+      "signature": "Oypha5vh1P_umKkFAsrX_6YAIYyx80A7llAl2ucu9uGY_FDbmg06OrqMETKIiufBGQmmne9ioR394s-67xkyBw"
+    }
+  ]
+}
