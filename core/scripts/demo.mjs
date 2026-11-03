@@ -26,4 +26,5 @@ console.log('The next identical message uses its receipt as the anchor:\n');
 console.log(utf8(second));
 console.log('Same retry:', await actionId(first, origin) === checked.id);
 console.log('New occurrence:', await actionId(second, origin) !== checked.id);
-console.log('The future database must enforce action-ID uniqueness atomically.');
+console.log('The SQLite acceptance layer enforces action-ID uniqueness atomically.');
+console.log('This rehearsal still uses fixture receipts. See core/PROTOCOL.md#acceptance-receipts.');

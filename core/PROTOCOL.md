@@ -1,7 +1,7 @@
 # Native protocol v1 candidate
 
 This is the implemented protocol slice, not a deployed service contract.
-The native HTTP/SQLite/R2 host is the next slice. Freeze public v1 semantics
+The native SQLite/R2 acceptance layer exists; public HTTP is still ahead. Freeze public v1 semantics
 before accepting durable public records. Older offline naming/path experiments
 use different formats and are not parsed as this protocol.
 
@@ -121,6 +121,20 @@ action bytes itself. No `Sprig-Occurrence` header is supported.
 
 ## Keys and immutable plot bindings
 
+The host's operation-specific payloads are deliberately small:
+
+| Operation | Exact body |
+| --- | --- |
+| Sea upload | Valid UTF-8 source, currently up to 256 KiB |
+| Grove or plot publication | One existing `/sea/<hash_length>` reference followed by LF |
+| Plot allocation | Empty; the verified action author supplies its controller key |
+| Chat append | Valid UTF-8 message, currently up to 8192 bytes |
+
+A publication does not copy its source. Distinct publication slots remain
+distinct instances even when they reference the same value. A direct key or a
+plot bound to that key can authorize a plot's publications. Anyone may append
+to the public chat of an available subject. Run-step subjects are not hosted yet.
+
 ```text
 #!sprig.run/spec/key/1
 algorithm: ed25519
@@ -187,9 +201,18 @@ payload's content address. It does not verify durable admission or the
 correctness of a claimed plot binding. `nextAppendAction` uses this checked
 correspondence to construct the next action without changing the old one.
 
-Successful parsing/signature verification is not acceptance. The future host
-must atomically commit action-ID uniqueness, allocation, quotas and the receipt;
-only then acknowledge. Replay returns that receipt, subject to visibility policy.
+Successful parsing/signature verification is not acceptance. The native host
+atomically commits action-ID uniqueness, allocation, the action's metadata debit
+and the receipt, then waits for durable storage before acknowledging. Source
+bytes are prepaid in a separate private preparation reservation, to bound costs
+even when a PUT fails or publication never completes. Replay returns the original
+receipt, subject to visibility policy, without another growth debit.
+
+Read a receipt as: “I accepted this exact action and assigned it this result at
+this time.” `action` identifies the request, while `result` identifies what the
+request created. `key` and `binding` pin the authority used. The receipt does not
+contain the message, promise eternal availability, or prove that its host told
+the truth. It lets a client reconcile a lost reply and choose its next anchor.
 
 ## Bounds and errors
 

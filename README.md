@@ -6,8 +6,9 @@ The new [native-core protocol slice](core/README.md) implements the proposed
 `sprig.run` reference grammar, metadata-first signed actions, fixed plot authors,
 and receipt-based append continuation. `npm run demo:core` runs its offline
 signature rehearsal; `npm run seed:core` shows a small candidate public planting.
-Both need only Node 24 and upload nothing. The new HTTP/database service is next;
-the existing services below remain unchanged.
+Both need only Node 24 and upload nothing. The [native SQLite/R2 acceptance layer](core/host/README.md)
+now has fault and restart tests (`npm run test:acceptance`, requiring workerd).
+Public HTTP and whole-core recovery are next; the existing services below remain unchanged.
 
 This release gives the workbench a small resident: **A little fern**, an ordinary Moss program you can name, unfurl in three stages, and change. A second version grafts its frond vocabulary by hash. Both are in the example menu. The [garden note](GARDEN.md) keeps our design touchstone close to the code.
 

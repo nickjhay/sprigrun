@@ -25,7 +25,7 @@ export function utf8(bytes: Uint8Array): string {
 }
 export function textBytes(text: string): Uint8Array<ArrayBuffer> {
   check(typeof text === 'string', 'invalid_text');
-  const bytes = encoder.encode(text);
+  const bytes = Uint8Array.from(encoder.encode(text));
   check(utf8(bytes) === text, 'invalid_text'); // Do not replace lone surrogates.
   return bytes;
 }
