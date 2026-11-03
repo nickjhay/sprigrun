@@ -24,41 +24,46 @@
    overflow, no floating-point counter representation. SQL keys can use padded
    decimal TEXT; paths use ordinary unpadded canonical decimal.
 
-## Required native-host obligations, not implemented yet
+## Native-host obligations exercised by SQLite/R2 tests
 
-- Gate attempts before expensive body/crypto/storage work. Bound in-flight work,
-  permanent metadata growth, bodies and network operations separately.
+- Gate attempts before crypto/storage work, bound concurrent preparations, and
+  debit private source reservation before R2. Charge permanent action metadata
+  in acceptance. Public body reception and read-traffic bounds remain ahead.
 - Resolve plot author bindings from trusted retained history. Check target
   authority and current suppression inside the eventual acceptance boundary.
 - An anchor must exist in that collection. A valid old anchor allows intervening
   commits; a future/gap anchor rejects. GET creates no state.
 - Atomically commit the action's unique identity, next never-reused collection
-  number, accepted record, growth debit and immutable receipt.
+  number, accepted record, metadata growth debit and immutable receipt. Private
+  source storage has a separate earlier reservation so abandoned PUTs are paid.
 - Admit a signature at most once per exact action; a valid signature by itself
   does not prevent replay. Preserve consumed identities through suppression
   and restore. Verify that claimed author/key evidence matches admission policy.
 - Keep blob preparation outside short metadata commits. No R2 await or arbitrary
   user computation in that commit. Preserve the existing lost-reply, ambiguous
-  PUT, late-preparation and bounded-queue failure cases.
+  PUT, late-preparation and bounded-preparation failure cases.
 - Tag accepted immutable facts by snapshot epoch. Advance the barrier with
   bounded control state; export later. Counters and heads must be reconstructible
   or have retained historical allocation facts.
+- Receipt/body suppression must not erase the consumed action ID or make old
+  addresses reusable. A removed payload can make verification unavailable.
+
+## Remaining public-host obligations
+
 - Restore times, numbers, quotas, key evidence, receipts and suppression together.
   An old snapshot cannot reveal its unknown suffix. Reopening the same origin
   with unreconciled lost history can replay actions or reuse numbers.
 - Keep API handling ahead of static fallback. Serve untrusted bytes as inert text
   on the shared origin. Gate reads before shared caching can bypass suppression.
-- Receipt/body suppression must not erase the consumed action ID or make old
-  addresses reusable. A removed payload can make verification unavailable.
+- Bound HTTP body reception, read traffic and network lifetime. Authenticate
+  operator controls; expose no test hooks. Wire optional PoW without penalizing
+  the zero-work raw POST path.
 
-## Next implementation slice
-
-One SQLite-backed Durable Object implementing the real acceptance transaction,
-with fault-injection tests against it. Reuse these parsers and clients; do not
-build a second in-memory acceptance model as a substitute for durability.
-Extend the existing private-R2 preparation pattern, then the whole-service
-snapshot/restore. No guest execution, key-recovery tree, arbitrary MIME or
-decentralized ordering is needed for the first public core.
+The [native host](host/README.md) now implements the real acceptance transaction
+with fault-injection tests. Its epoch cut is not yet a backup/restore facility.
+The next substantial work is whole-core recovery, then the public HTTP surface.
+No guest execution, key-recovery tree, arbitrary MIME or decentralized ordering
+is needed for the first public core.
 
 Before public release, complete the recovery drill, calibrate metadata/traffic
 limits and costs, and establish report/suppression and independent backup

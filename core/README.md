@@ -1,9 +1,10 @@
-# Sprig native core: protocol slice
+# Sprig native core
 
 3 November 2026. Executable protocol groundwork for the new public service at
-`https://sprig.run`. No HTTP service, database, deployment, or atomic acceptance
-is implemented in this package yet. The running workbench/store/channels are
-unchanged; the older implementation is preserved on
+`https://sprig.run`. The protocol and [SQLite/R2 acceptance layer](host/README.md)
+are implemented and tested locally. Public HTTP routing, whole-core recovery
+and deployment remain ahead. The running workbench/store/channels are unchanged;
+the older implementation is preserved on
 [reference/pre-native-core-2026-11-02](https://github.com/nickjhay/sprigrun/tree/reference/pre-native-core-2026-11-02).
 
 With Node 24 and the root dependencies installed:
@@ -18,6 +19,11 @@ These commands do not need workerd, an account, or network access. The demo uses
 a clearly public test key and a fixture receipt. It verifies signed intent and
 shows a sender continuing from anchor 12 through an allocated entry 27.
 The seed command prints a candidate inventory; it does not provision identities.
+
+`npm run test:acceptance` exercises the real Durable Object and private R2 in
+Miniflare, including on-disk restart, lost replies and injected failures. This
+additional command needs a supported workerd platform; the three commands above
+still work without it.
 
 - [PROTOCOL.md](PROTOCOL.md): normative candidate v1 bytes, references and errors.
 - [INVARIANTS.md](INVARIANTS.md): proof obligations, trust boundaries and next steps.
@@ -47,6 +53,8 @@ it never overwrites that entry. For example, `POST /plot/moss.3` asks for anothe
 plot under the handle `moss`; `POST /plot/moss.3/notes` publishes under that plot.
 Source storage at `POST /sea` remains idempotent by bytes.
 
-The first persistence slice should implement shared transactional acceptance,
-rather than an independent in-memory twin. Keep parsers/crypto in this package,
-add native SQLite transactions, and reuse these exact clients and test vectors.
+The host reuses these exact parsers and clients. Its acceptance transaction
+commits the action identity, allocation, record, metadata debit and receipt
+together. Private source preparation has its own durable quota reservation;
+failed preparation does not publish anything. See the host note for the precise
+cost boundary and the remaining public-release work.
