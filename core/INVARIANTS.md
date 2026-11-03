@@ -48,11 +48,26 @@
 - Receipt/body suppression must not erase the consumed action ID or make old
   addresses reusable. A removed payload can make verification unavailable.
 
+## Recovery obligations exercised by SQLite/R2 tests
+
+- Copy a closed epoch while later commits continue. Project private preparations
+  at the cut; preserve their debit without requiring unpublished bytes.
+- Restore times, numbers, accounting, key evidence, receipts and suppression
+  together. Match every entry and published source to retained acceptance.
+- Verify source hashes, exact action/receipt correspondence, signature evidence,
+  authority and referenced facts before completing the import.
+- Commit each imported record with its resume cursor. A repeated acknowledgement
+  or ambiguous R2 write must not duplicate history or debit.
+- Require an empty target, matching origin/policy and pinned archive digest.
+  Persist quarantine independently of environment settings; incomplete or invalid
+  history cannot become readable by accidentally dropping the setting.
+- Leave restored writes paused and spendable credits zero. An old snapshot cannot
+  reveal its unknown suffix. Reopening the same origin with unreconciled lost
+  history can replay actions or reuse numbers; release is an explicit operator
+  assertion, not a proof that the suffix has been recovered.
+
 ## Remaining public-host obligations
 
-- Restore times, numbers, quotas, key evidence, receipts and suppression together.
-  An old snapshot cannot reveal its unknown suffix. Reopening the same origin
-  with unreconciled lost history can replay actions or reuse numbers.
 - Keep API handling ahead of static fallback. Serve untrusted bytes as inert text
   on the shared origin. Gate reads before shared caching can bypass suppression.
 - Bound HTTP body reception, read traffic and network lifetime. Authenticate
@@ -60,11 +75,11 @@
   the zero-work raw POST path.
 
 The [native host](host/README.md) now implements the real acceptance transaction
-with fault-injection tests. Its epoch cut is not yet a backup/restore facility.
-The next substantial work is whole-core recovery, then the public HTTP surface.
+with fault-injection tests and [whole-core recovery](RECOVERY.md). The next
+substantial work is the public HTTP surface, operator transport and explorer.
 No guest execution, key-recovery tree, arbitrary MIME or decentralized ordering
 is needed for the first public core.
 
-Before public release, complete the recovery drill, calibrate metadata/traffic
+Before public release, establish a recovery procedure, calibrate metadata/traffic
 limits and costs, and establish report/suppression and independent backup
 operations. The protocol demo and frozen fixtures make none of those claims.

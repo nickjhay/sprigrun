@@ -14,7 +14,7 @@
     "dev:ui": "node scripts/dev.mjs --ui-only",
     "typecheck": "tsc --noEmit && tsc -p store/tsconfig.json --noEmit && tsc -p store/tsconfig.client.json --noEmit && tsc -p channels/tsconfig.json --noEmit && tsc -p channels/tsconfig.client.json --noEmit && tsc -p core/tsconfig.json --noEmit && tsc -p core/host/tsconfig.json --noEmit",
     "test": "node --test test/*.test.mjs",
-    "check": "npm run typecheck && npm run test:core && npm run test:acceptance && npm test && npm run test:store && npm run test:channels && npm run test:pricing && npm run build",
+    "check": "npm run typecheck && npm run test:core && npm run test:acceptance && npm run test:recovery && npm test && npm run test:store && npm run test:channels && npm run test:pricing && npm run build",
     "test:store": "npm --prefix store test && node --test test/store.integration.mjs",
     "seed": "node scripts/seed.mjs",
     "predemo:names": "node scripts/check-node.mjs",
@@ -30,7 +30,10 @@
     "test:core": "node --test core/test/*.test.mjs",
     "test:acceptance": "node --test core/test/acceptance.integration.mjs",
     "demo:core": "node core/scripts/demo.mjs",
-    "seed:core": "node core/scripts/seeds.mjs"
+    "seed:core": "node core/scripts/seeds.mjs",
+    "test:recovery": "node --test core/test/recovery.integration.mjs",
+    "demo:recovery": "node core/scripts/recovery-garden.mjs",
+    "verify:recovery": "node core/scripts/recover.mjs verify"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261026.1",

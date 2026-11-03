@@ -2,8 +2,9 @@
 
 3 November 2026. Executable protocol groundwork for the new public service at
 `https://sprig.run`. The protocol and [SQLite/R2 acceptance layer](host/README.md)
-are implemented and tested locally. Public HTTP routing, whole-core recovery
-and deployment remain ahead. The running workbench/store/channels are unchanged;
+and [whole-core recovery](RECOVERY.md) are implemented and tested locally.
+Public HTTP routing, the explorer and deployment remain ahead.
+The running workbench/store/channels are unchanged;
 the older implementation is preserved on
 [reference/pre-native-core-2026-11-02](https://github.com/nickjhay/sprigrun/tree/reference/pre-native-core-2026-11-02).
 
@@ -58,3 +59,6 @@ commits the action identity, allocation, record, metadata debit and receipt
 together. Private source preparation has its own durable quota reservation;
 failed preparation does not publish anything. See the host note for the precise
 cost boundary and the remaining public-release work.
+
+The native host now includes [whole-core recovery](RECOVERY.md). Run
+`npm run demo:recovery` for a real local SQLite/R2 loss-and-restore drill.

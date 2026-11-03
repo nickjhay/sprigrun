@@ -9,6 +9,7 @@ export class TestCoordinator extends NativeCoordinator {
     const io = { puts: 0, gets: 0, failPut: null as string | null,
       hold: null as Promise<void> | null, release: null as (() => void) | null, waiting: 0 };
     const sources = {
+      list: (...args: any[]) => Reflect.apply(env.SOURCES.list, env.SOURCES, args),
       get: (...args: any[]) => { io.gets++; return Reflect.apply(env.SOURCES.get, env.SOURCES, args); },
       put: async (...args: any[]) => {
         io.puts++; io.waiting++;
@@ -50,6 +51,7 @@ export class TestCoordinator extends NativeCoordinator {
       'INSERT INTO heads VALUES (?, ?) ON CONFLICT(collection) DO UPDATE SET number=excluded.number',
       value.collection, orderedU64(value.number));
     else if (command === 'rows') return {
+      heads: this.db.sql.exec('SELECT * FROM heads ORDER BY collection').toArray(),
       sources: this.db.sql.exec('SELECT * FROM sources ORDER BY address').toArray(),
       entries: this.db.sql.exec('SELECT * FROM entries ORDER BY path').toArray(),
       accepted: this.db.sql.exec('SELECT * FROM accepted ORDER BY id').toArray(),
@@ -81,6 +83,13 @@ export default {
       if (path === '/suppress') { await stub.suppress(value.path, value.suppressed); return Response.json(null); }
       if (path === '/pause') { await stub.pause(value.paused); return Response.json(null); }
       if (path === '/cut') return Response.json(await stub.cut());
+      if (path === '/snapshotHeader') return Response.json(await stub.snapshotHeader(value.epoch));
+      if (path === '/snapshotPage') return Response.json(await stub.snapshotPage(value.epoch, value.table, value.after));
+      if (path === '/snapshotRecord') return Response.json(await stub.snapshotRecord(value.epoch, value.table, value.key));
+      if (path === '/restoreStatus') return Response.json(await stub.restoreStatus());
+      if (path === '/restoreBegin') return Response.json(await stub.restoreBegin(value.header, value.footer));
+      if (path === '/restoreRecord') return Response.json(await stub.restoreRecord(value.index, value.line));
+      if (path === '/restoreFinish') return Response.json(await stub.restoreFinish());
       return Response.json(await stub.testCommand(path.slice(1), value));
     } catch (error) { return new Response((error as Error).message, { status: 409 }); }
   },

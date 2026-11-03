@@ -9,7 +9,9 @@ test-only and exposes privileged fault controls: never deploy it.
 ```sh
 npm run test:core        # Portable protocol tests; Node 24 only.
 npm run test:acceptance  # Real SQLite/R2; needs a supported workerd platform.
-npm run check           # Includes both and all existing project checks.
+npm run test:recovery    # Whole-core loss, corruption and interrupted-restore checks.
+npm run demo:recovery    # Delete local SQL/R2, restore, and continue a chat.
+npm run check           # Includes native recovery and all existing project checks.
 ```
 
 ## The short commit
@@ -108,7 +110,7 @@ still needs inert text MIME, cache policy, bounded read traffic, useful errors,
 help/spec discovery and authenticated operator routes. No HTTP GET is wired to
 create state here. Do not expose privileged methods through a generic RPC router.
 
-## Snapshot boundary and remaining recovery work
+## Snapshot boundary and recovery
 
 `cut()` saves the small control state at epoch N and advances to N+1 in one
 transaction. It does not acquire a preparation lock or await R2. A PUT already
@@ -118,19 +120,21 @@ records when the value became public. Tests hold an actual R2 PUT while making
 the cut. There is no claim about a particular production latency yet.
 
 Entries, accepted actions, suppression changes and cuts retain their epochs.
-Sources retain reservation and first-publication epochs separately. A future
-exporter must interpret both at the cut, not export their present-day row as if
-all fields already existed at N. It must also retain exact action evidence,
-timestamps, quota control and consumption identities. No exporter, restore
-protocol, physical deletion or pin release is implemented in this new core yet.
-Do not use the old source-store recovery tool on this schema.
+Sources retain reservation and first-publication epochs separately. The exporter
+projects both at the cut and copies exact bytes, action evidence, timestamps,
+quota control and consumption identities. The restore target validates the archive
+and rebuilds heads while quarantined; interrupted imports resume durably. Original
+credits remain historical, while spendable credits reset to zero. See the
+[recovery guide](../RECOVERY.md) for the format, loss drill and release boundary.
+Physical deletion and pin release are not implemented. Do not use the old
+source-store recovery tool on this schema.
 
 An old backup cannot reveal its unknown suffix. Recovering to the same public
 origin requires reconciling allocation/consumption/suppression high-water marks
 before reopening; otherwise numbers or signed actions could be reused.
 
-Before public release: complete the whole-core recovery drill, public HTTP and
-body admission, operator authentication, report/takedown operations, cost/load
+Before public release: wire public HTTP and body admission, operator
+authentication, independent backup operations, report/takedown operations, cost/load
 calibration and seed installation through normal admission. Native PoW is also
 not wired yet; the older store's PoW implementation remains a reference. No
 private message boxes, genesis recovery, arbitrary MIME or Sprig execution are
