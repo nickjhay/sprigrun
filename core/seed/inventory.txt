@@ -1,0 +1,10 @@
+#!sprig.run/spec/seed-inventory/1
+
+value moss_profile c7dadac9e1e582b7fe9adef2a82c35cbbc7981085d8a7fd02e5f62c9c93df8f3_459 moss_profile.md
+value first_morning 37da80d88c9b7b084e9f3771ceb6e14d7bee7977d606f1719c539498f5ba0483_619 first_morning.md
+value small_sum b201271b14b3b70824a75adb77e725ec5eea71dd3b3363353fcdfe02db283997_136 small_sum.moss
+value welcome e451fcedcc15318c4bff7738681928975e8ba418e0512504cd96442cf99c9344_164 welcome.txt
+identity moss /plot/moss key=unprovisioned profile=moss_profile
+publication morning owner=moss topic=notes/first_morning value=first_morning
+publication sum owner=- topic=/grove/small_sum value=small_sum
+message author=moss publication=sum value=welcome

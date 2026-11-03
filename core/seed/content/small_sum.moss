@@ -1,0 +1,4 @@
+#!moss/1
+# A first program for the existing toy runtime; this is not Sprig syntax.
+1 2 + print
+"Three is enough for a beginning." print
