@@ -38,6 +38,7 @@ export class State {
         accepted_at_ms TEXT NOT NULL, debit INTEGER NOT NULL,
         header TEXT NOT NULL, body TEXT, source TEXT, signature TEXT,
         key_record TEXT, author_binding TEXT, receipt TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS accepted_result ON accepted(result, id);
       CREATE TABLE IF NOT EXISTS suppressions (
         path TEXT NOT NULL, revision TEXT NOT NULL, epoch TEXT NOT NULL,
         suppressed INTEGER NOT NULL, at_ms TEXT NOT NULL, PRIMARY KEY(path, revision));

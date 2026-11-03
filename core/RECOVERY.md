@@ -145,7 +145,10 @@ post-cut acceptance occurred. An incomplete or corrupt import is never releasabl
 - `scripts/local-native.mjs`: local privileged transport for the actual native
   coordinator. It has no authentication and is never a deployable public adapter.
 
-Still before launch: authenticated operator transport, scheduled independent
-backups and trusted-digest retention, an operational suffix-reconciliation
-procedure, public HTTP/body admission, report/suppression handling, and measured
-cost/load limits. The old store's recovery tools do not understand this schema.
+The [authenticated HTTP adapter](HTTP.md) now supports these operations, using
+`scripts/http-client.mjs` with the same file exporter/importer. Its integration
+tests cover backup and quarantined restore through the production route handlers.
+
+Still before launch: scheduled independent backups and trusted-digest retention,
+an operational suffix-reconciliation procedure, report/suppression handling,
+and measured cost/load limits. The old store's recovery tools do not understand this schema.

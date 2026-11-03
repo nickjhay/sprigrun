@@ -3,7 +3,8 @@
 3 November 2026. Executable protocol groundwork for the new public service at
 `https://sprig.run`. The protocol and [SQLite/R2 acceptance layer](host/README.md)
 and [whole-core recovery](RECOVERY.md) are implemented and tested locally.
-Public HTTP routing, the explorer and deployment remain ahead.
+The [public HTTP adapter and linked explorer](HTTP.md) are implemented locally;
+deployment remains ahead.
 The running workbench/store/channels are unchanged;
 the older implementation is preserved on
 [reference/pre-native-core-2026-11-02](https://github.com/nickjhay/sprigrun/tree/reference/pre-native-core-2026-11-02).
@@ -62,3 +63,8 @@ cost boundary and the remaining public-release work.
 
 The native host now includes [whole-core recovery](RECOVERY.md). Run
 `npm run demo:recovery` for a real local SQLite/R2 loss-and-restore drill.
+
+Run `npm run dev:core -- --operator` for the native local service at
+http://127.0.0.1:8789/, with a small planting installed through normal HTTP
+admission. This needs a supported workerd platform. `npm run test:http` covers
+the public and authenticated operator transports; it is included in `check`.

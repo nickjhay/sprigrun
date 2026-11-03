@@ -28,7 +28,8 @@
 
 - Gate attempts before crypto/storage work, bound concurrent preparations, and
   debit private source reservation before R2. Charge permanent action metadata
-  in acceptance. Public body reception and read-traffic bounds remain ahead.
+  in acceptance. HTTP body reception shares the eight active slots and attempt
+  debit; actual byte count and total deadline bound each application reader.
 - Resolve plot author bindings from trusted retained history. Check target
   authority and current suppression inside the eventual acceptance boundary.
 - An anchor must exist in that collection. A valid old anchor allows intervening
@@ -66,17 +67,30 @@
   history can replay actions or reuse numbers; release is an explicit operator
   assertion, not a proof that the suffix has been recovered.
 
+## HTTP obligations exercised against the real runtime
+
+- Require exact signed/actual URL agreement and explicit signed-envelope mode.
+- Serve raw UTF-8 as inert text; escape all user content in trusted HTML.
+- Check suppression before aliases, listings, receipts, evidence and conditional
+  reads. Never return corrupt R2 bytes or rewind latest behind a hidden head.
+- Examine at most 32 indexed rows per page; permit empty pages with continuation.
+  Listings fetch no R2 bytes and GET writes no durable view counter.
+- Admit attempts before application body reads, bound body size/time and shared
+  active slots, and release slots after timeout/error. Transport may prefetch.
+- Authenticate fixed operator routes, keep test faults out of the public Worker,
+  and preserve persistent quarantine through the authenticated recovery adapter.
+
 ## Remaining public-host obligations
 
 - Keep API handling ahead of static fallback. Serve untrusted bytes as inert text
   on the shared origin. Gate reads before shared caching can bypass suppression.
-- Bound HTTP body reception, read traffic and network lifetime. Authenticate
-  operator controls; expose no test hooks. Wire optional PoW without penalizing
-  the zero-work raw POST path.
+- Measure provider/transport cost and load beyond the application limits. The
+  read bucket is volatile overload protection, not a durable billing cap.
+  Wire optional PoW without penalizing the zero-work raw POST path.
 
 The [native host](host/README.md) now implements the real acceptance transaction
-with fault-injection tests and [whole-core recovery](RECOVERY.md). The next
-substantial work is the public HTTP surface, operator transport and explorer.
+with fault-injection tests, [whole-core recovery](RECOVERY.md), and a locally
+tested [HTTP surface, operator transport and explorer](HTTP.md).
 No guest execution, key-recovery tree, arbitrary MIME or decentralized ordering
 is needed for the first public core.
 

@@ -2,9 +2,9 @@
 
 This is the real SQLite-backed Durable Object, tested with local R2 through
 Miniflare. It is not connected to the existing public Worker or workbench yet.
-There is deliberately no public HTTP entrypoint, deployment configuration, or
-production seed key in this directory. The HTTP adapter under `core/test` is
-test-only and exposes privileged fault controls: never deploy it.
+The production HTTP entrypoint and explorer live in [core/http](../HTTP.md).
+No production deployment or seed key is configured. Adapters under `core/test`
+are test-only and expose privileged fault controls: never deploy them.
 
 ```sh
 npm run test:core        # Portable protocol tests; Node 24 only.
@@ -19,9 +19,9 @@ npm run check           # Includes native recovery and all existing project chec
 `submit` receives exact action bytes and an optional detached signature over
 trusted internal RPC. It bounds concurrent preparations to eight and durably
 debits attempt credit before hashing, key lookup, signature verification or R2
-work. A future HTTP adapter must additionally admit traffic and bound/timeout
-body reception *before* calling this method. It must check that the actual HTTP
-destination agrees with the signed destination.
+work. HTTP uses the same acceptance path, sharing its active slots and durable
+attempt debit before reading a bounded body with a total deadline. The adapter
+also requires exact agreement between actual and signed HTTP destinations.
 
 The host resolves author keys and plot bindings from its own accepted state.
 Clients cannot provide substitute bindings. It rechecks ownership, referenced
@@ -105,10 +105,10 @@ Suppression changes append historical facts and never delete receipt/allocation
 state or refund credit. Only sea hashes can be suppressed before they exist;
 numbered entries must already exist, avoiding a blocked unallocated next slot.
 
-These are internal read methods, not finished HTTP responses. The public adapter
-still needs inert text MIME, cache policy, bounded read traffic, useful errors,
-help/spec discovery and authenticated operator routes. No HTTP GET is wired to
-create state here. Do not expose privileged methods through a generic RPC router.
+The public adapter adds inert text MIME, private/no-store cache policy, bounded
+read traffic, useful errors, help/spec discovery and authenticated fixed operator
+routes. GET creates no permanent per-view state. Listings use bounded indexed SQL
+and no R2 reads. Do not expose privileged methods through a generic RPC router.
 
 ## Snapshot boundary and recovery
 
@@ -133,9 +133,9 @@ An old backup cannot reveal its unknown suffix. Recovering to the same public
 origin requires reconciling allocation/consumption/suppression high-water marks
 before reopening; otherwise numbers or signed actions could be reused.
 
-Before public release: wire public HTTP and body admission, operator
-authentication, independent backup operations, report/takedown operations, cost/load
-calibration and seed installation through normal admission. Native PoW is also
+Before public release: independent backup operations, report/takedown operations,
+cost/load calibration and production seed custody. HTTP/body admission, operator
+authentication and local seed installation through normal admission are implemented. Native PoW is also
 not wired yet; the older store's PoW implementation remains a reference. No
 private message boxes, genesis recovery, arbitrary MIME or Sprig execution are
 part of this acceptance slice.
