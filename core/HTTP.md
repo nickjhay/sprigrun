@@ -49,7 +49,7 @@ changes; there is no hot reload.
 | `GET RECORD?view=html` | Escaped text, metadata and ordinary navigation links |
 | `GET /action/ID`, `/receipt/ID`, `/evidence/ID` | Exact action, receipt, or JSON signature evidence |
 | `GET /action?result=RECORD` | Acceptances for one available result, including a multiply-signed sea value |
-| `GET /stats` | Admission caps, credits, accepted/debit totals, epoch and live upload count |
+| `GET /stats` | Admission caps, credits, accepted/debit totals, journal bytes, epoch and live upload count |
 | `POST /sea` | Anonymous exact UTF-8 source; receipt in response |
 | `POST COLLECTION` or `POST EXISTING_ENTRY` | Append, with the optional existing entry as anchor |
 
@@ -166,11 +166,17 @@ URL. Fixed table queries only; there is no generic RPC or arbitrary SQL endpoint
 | `GET /admin/snapshot/header?epoch=N` | Exact archive header |
 | `GET /admin/snapshot/page?epoch=N&table=T&after=C` | Bounded eligible keys |
 | `GET /admin/snapshot/record?epoch=N&table=T&key=K` | One exact archive record |
+| `GET /admin/snapshot/batch?epoch=N&table=T&after=C` | Bounded metadata records; sources use individual reads |
 | `GET /admin/recovery/status` | Persistent recovery status |
 | `POST /admin/restore/begin` | JSON containing canonical `header` and `footer` strings |
 | `POST /admin/restore/record?index=N` | One canonical archive line |
 | `POST /admin/restore/finish` | Empty body; validate imported history |
 | `POST /admin/restore/release` | JSON `chain` and `confirmation: "history-reconciled"` |
+
+A separate `BACKUP_TOKEN` secret can authorize snapshot reads and `POST /admin/cut`
+only. See [OPERATIONS.md](OPERATIONS.md) for the independent runner and digest
+custody. Choose a different value from `ADMIN_TOKEN`. Export includes suppressed
+content, so this is still a privileged credential.
 
 `nativeClient` in `scripts/http-client.mjs` implements the same adapter consumed
 by the existing bounded `backup` and `restore` file functions. For example, from
@@ -206,7 +212,9 @@ No production resources/routes are configured here. Never deploy a module from
 planting state. The public Worker has no test routes. Deploy it as the authoritative
 API handler ahead of any editor/static fallback, on the exact signed origin.
 
-Before public launch: measured load/cost limits; report inbox and operator
+The [local rehearsal and editable cost model](OPERATIONS.md) now cover native
+allocation, R2 operations, batching and request limits. Before public launch:
+production provider limits and capacity monitoring; report inbox and operator
 suppression practice; independent backups, trusted digests and reconciliation
 procedure; production seed custody; frozen v1 semantics; and a visual browser
 check on the deployed preview. `/report` currently gives contact instructions,

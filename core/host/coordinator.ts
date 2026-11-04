@@ -18,7 +18,7 @@ import { body, httpPolicy, ReadGate, HttpError, uploadHeaders, urlFor, query, ty
 
 export interface Env {
   SOURCES: R2Bucket; CORE_ORIGIN: string; CORE_POLICY?: Policy; CORE_RESTORE_MODE?: string;
-  CORE_HTTP_POLICY?: HttpPolicy; ADMIN_TOKEN?: string; CORE_LOCAL_OPERATOR?: string; ABUSE_EMAIL?: string;
+  CORE_HTTP_POLICY?: HttpPolicy; ADMIN_TOKEN?: string; BACKUP_TOKEN?: string; CORE_LOCAL_OPERATOR?: string; ABUSE_EMAIL?: string;
 }
 type Verified = { action: Action; id: string; key: string | null; binding: string | null;
   keyRecord: string | null; authorBinding: string | null; source: string | null;
@@ -283,6 +283,7 @@ export class NativeCoordinator extends DurableObject<Env> {
   publicStats() {
     this.normal(); const c = this.db.control(); this.refresh(c); // Projection only: no durable view counter.
     return { origin: c.origin, epoch: c.epoch, writes_paused: c.paused, accepted_actions: c.accepted,
+      journal_bytes: this.db.sql.databaseSize,
       reserved_source_bytes: c.reservedBytes, accepted_debit_bytes: c.acceptedDebit,
       growth_credit: c.growth.tokens, burst_credit: c.burst.tokens, attempt_credit: c.attempts.tokens,
       source_limit: this.p.sourceBytes, chat_limit: this.p.chatBytes, active_uploads: this.active,
@@ -361,6 +362,11 @@ export class NativeCoordinator extends DurableObject<Env> {
   }
   snapshotHeader(epoch: string) { this.normal(); return this.recovery.header(epoch); }
   snapshotPage(epoch: string, table: string, after: string) { this.normal(); return this.recovery.page(epoch, table, after); }
+  async snapshotBatch(epoch: string, table: string, after: string) {
+    this.normal(); check(this.exporting < 2, 'snapshot_busy'); this.exporting++;
+    try { return await this.recovery.batch(epoch, table, after); }
+    finally { this.exporting--; }
+  }
   async snapshotRecord(epoch: string, table: string, key: string) {
     this.normal(); check(this.exporting < 2, 'snapshot_busy'); this.exporting++;
     try { return await this.recovery.record(epoch, table, key); } finally { this.exporting--; }

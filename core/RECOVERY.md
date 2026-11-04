@@ -149,6 +149,9 @@ The [authenticated HTTP adapter](HTTP.md) now supports these operations, using
 `scripts/http-client.mjs` with the same file exporter/importer. Its integration
 tests cover backup and quarantined restore through the production route handlers.
 
-Still before launch: scheduled independent backups and trusted-digest retention,
-an operational suffix-reconciliation procedure, report/suppression handling,
-and measured cost/load limits. The old store's recovery tools do not understand this schema.
+The [operations guide](OPERATIONS.md) adds an executable independent-backup runner,
+a restricted export credential, separate digest witnesses, batched metadata
+export, and a local cost/load rehearsal. Still before launch: actually schedule
+independent backups and establish trusted-digest custody, exercise an operational
+suffix-reconciliation procedure, configure report/suppression handling, and set
+provider protections and capacity monitoring. The old store's recovery tools do not understand this schema.
