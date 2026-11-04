@@ -13,9 +13,8 @@ export function methods(path: string): string | null {
         return 'GET, HEAD, OPTIONS' + (path === '/sea' ? ', POST' : '');
     if (/^\/(action|receipt|evidence)\//.test(path)) {
         try {
-            parseAddress(path.split('/')[2]!);
-            if (path.split('/').length === 3)
-                return 'GET, HEAD, OPTIONS';
+            const ref = parseReference(path.slice(path.indexOf('/', 1)));
+            if (ref.kind !== 'chat' && ref.kind !== 'step') return 'GET, HEAD, OPTIONS';
         }
         catch { }
         return null;
@@ -72,20 +71,20 @@ async function publicRead(request: Request, env: Env, core: NativeCoordinator, u
         return pageResponse(env, url, q.container ?? kind, core.browse(q), p.get('view') === null || htmlView(p));
     }
     if (/^\/(action|receipt|evidence)\//.test(path)) {
-        const p = query(url, ['view']), html = htmlView(p), [, kind, id] = path.split('/');
-        parseAddress(id!);
-        const info = core.describeAction(id!);
+        const p = query(url, ['view']), html = htmlView(p), kind = path.split('/')[1];
+        const result = path.slice(path.indexOf('/', 1));
+        const info = core.describeAction(result);
         if (kind === 'receipt')
             return html ? actionPage(env, info, info.rawReceipt, true) : text(info.rawReceipt);
-        const evidence = await core.evidence(id!);
+        const evidence = await core.evidence(result);
         if (kind === 'evidence')
             return json(evidence);
         return html ? actionPage(env, info, evidence.action) : text(evidence.action);
     }
-    const p = query(url, ['view', 'after', 'select', ...(path === '/action' ? ['result'] : [])]), html = htmlView(p);
+    const p = query(url, ['view', 'after', 'select']), html = htmlView(p);
     let q: Browse | null = null;
     if (ROOTS.has(path))
-        q = { kind: ROOTS.get(path)!, container: p.get('result'), after: p.get('after') ?? '' };
+        q = { kind: ROOTS.get(path)!, container: null, after: p.get('after') ?? '' };
     else {
         try {
             const t = parsePostTarget(path);
@@ -145,10 +144,10 @@ async function operatorRoute(request: Request, env: Env, core: NativeCoordinator
             query(url, []);
             return json(core.restoreStatus());
         }
-        if (path === '/admin/accepted') {
-            query(url, ['id', 'view']);
-            const value = core.operatorRecord(p.get('id') ?? '');
-            return htmlView(p) ? operatorPage(env, 'Accepted action', value) : json(value);
+        if (path === '/admin/result') {
+            query(url, ['path', 'view']);
+            const value = core.operatorRecord(p.get('path') ?? '');
+            return htmlView(p) ? operatorPage(env, 'Committed result', value) : json(value);
         }
         if (path.startsWith('/admin/snapshot/')) {
             const method = path.slice('/admin/snapshot/'.length);
@@ -225,7 +224,7 @@ export async function handleHttp(request: Request, env: Env, core: NativeCoordin
             query(url, []);
             const receipt = await core.submitHttp(request), info = parseReceipt(textBytes(receipt), env.CORE_ORIGIN);
             return text(receipt, 200, { Location: info.result,
-                Link: `</action/${info.action}>; rel="related", </receipt/${info.action}>; rel="describedby"` });
+                Link: `</action${new URL(info.result).pathname}>; rel="related", </receipt${new URL(info.result).pathname}>; rel="describedby"` });
         }
         return await reads.run(() => publicRead(request, env, core, url));
     }

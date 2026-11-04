@@ -108,8 +108,8 @@ test('SQLite and R2 retain exact UTF-8 bodies, including BOM, NUL, CRLF and nest
     // Response.text() strips a leading BOM; inspect transported bytes instead.
     assert.deepEqual(new Uint8Array(await response.arrayBuffer()), textBytes(body));
   }
-  for (const bytes of [sourceAction, chatAction]) {
-    const evidence = await json(rpc(mf, '/evidence', { id: await actionId(bytes, origin) }));
+  for (const [bytes, path] of [[sourceAction, value], [chatAction, message]]) {
+    const evidence = await json(rpc(mf, '/evidence', { path }));
     assert.equal(evidence.action, new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes));
   }
 });
@@ -143,7 +143,7 @@ test('a fault inside acceptance rolls back counter, action identity, receipt and
   assert.equal(failed.accepted, before.accepted);
   assert.equal(failed.acceptedDebit, before.acceptedDebit);
   assert.equal(failed.growth.tokens, before.growth.tokens);
-  assert.equal((await json(rpc(mf, '/rows'))).entries.length, 1);
+  assert.equal((await json(rpc(mf, '/rows'))).results.length, 2);
   assert.equal(await accept(mf, bytes), '/chat/grove/fern.0/0');
 });
 
@@ -203,7 +203,7 @@ test('signed plot authors resolve retained bindings, retain verifiable evidence,
   const publish = act(owner.plot + '/notes', value + '\n', owner.plot);
   const signature = await signAction(publish, owner.pair.privateKey, origin);
   assert.equal(await accept(mf, publish, signature), owner.plot + '/notes.0');
-  const evidence = await json(rpc(mf, '/evidence', { id: await actionId(publish, origin) }));
+  const evidence = await json(rpc(mf, '/evidence', { path: owner.plot + '/notes.0' }));
   assert.equal(evidence.action, new TextDecoder().decode(publish));
   assert.equal(evidence.signature, signature);
   const verified = await verifyAction(textBytes(evidence.action), evidence.signature,
@@ -236,7 +236,7 @@ test('suppression during preparation is rechecked; latest never rewinds and rece
   await good(rpc(mf, '/suppress', { path: base + '/1', suppressed: true }));
   await bad(rpc(mf, '/latest', { path: base }), 'suppressed');
   await bad(submit(mf, first), 'suppressed');
-  await bad(rpc(mf, '/evidence', { id: await actionId(first, origin) }), 'suppressed');
+  await bad(rpc(mf, '/evidence', { path: base + '/1' }), 'suppressed');
   assert.equal(await good(submit(mf, second)), receipt);
   await good(rpc(mf, '/hold'));
   const pending = submit(mf, act(base, 'late'));
@@ -298,13 +298,11 @@ test('an epoch cut does not wait for a stalled R2 PUT and moves pending commits 
   assert.equal((await json(rpc(mf, '/io'))).waiting, 1);
   assert.equal(await json(rpc(mf, '/cut')), '0');
   const during = await json(rpc(mf, '/rows'));
-  assert.equal(during.accepted.length, 0);
+  assert.equal(during.results.length, 0);
   assert.equal(during.sources[0].reserved_epoch, '00000000000000000000');
-  assert.equal(during.sources[0].published_epoch, null);
   await good(rpc(mf, '/release-put')); await good(pending);
   const after = await json(rpc(mf, '/rows'));
-  assert.equal(after.sources[0].published_epoch, '00000000000000000001');
-  assert.equal(after.accepted[0].epoch, '00000000000000000001');
+  assert.equal(after.results[0].epoch, '00000000000000000001');
   assert.equal(JSON.parse(after.cuts[0].control).accepted, '0');
 });
 
@@ -352,8 +350,8 @@ test('a pre-cut paid reservation restores without an unpublished R2 body, even w
   const target = start({}, undefined, true); t.after(() => target.dispose());
   await restore(recovery(target), file, saved.footer.chain);
   const rows = await json(rpc(target, '/rows')), io = await json(rpc(target, '/io'));
-  assert.equal(rows.sources.length, 1); assert.equal(rows.sources[0].published_epoch, null);
-  assert.equal(rows.accepted.length, 0); assert.equal(io.puts, 0); assert.equal(io.gets, 0);
+  assert.equal(rows.sources.length, 1);
+  assert.equal(rows.results.length, 0); assert.equal(io.puts, 0); assert.equal(io.gets, 0);
   assert.equal((await json(rpc(target, '/stats'))).reservedBytes, '8192');
 });
 
@@ -389,7 +387,55 @@ test('recovery preserves allocation gaps and exact u64 numbers beyond JavaScript
   const target = start({}, undefined, true); t.after(() => target.dispose());
   await restore(recovery(target), file, saved.footer.chain);
   const rows = await json(rpc(target, '/rows'));
-  const entry = rows.entries.find(e => e.path === result);
+  const entry = rows.results.find(e => e.path === result);
   assert.equal(entry.number, '00009007199254740993');
   assert.equal(rows.heads.find(h => h.collection === base).number, entry.number);
+});
+
+test('distinct source actions race for one result and receipt; the loser spends no publication credit', async t => {
+  const mf = use(t), alice = await identity(mf, 'alice'), bob = await identity(mf, 'bob');
+  const body = 'the first committed fern', path = '/sea/' + await contentAddress(textBytes(body));
+  const actions = [alice, bob].map(owner => act('/sea', body, owner.plot));
+  const signatures = await Promise.all(actions.map((a, i) => signAction(a, [alice, bob][i].pair.privateKey, origin)));
+  const before = await json(rpc(mf, '/stats'));
+  await good(rpc(mf, '/hold'));
+  const pending = actions.map((a, i) => submit(mf, a, signatures[i]));
+  await held(mf, 2);
+  await good(rpc(mf, '/release'));
+  const replies = await Promise.all(pending), winner = replies.findIndex(r => r.status === 200), loser = 1 - winner;
+  assert.ok(winner >= 0);
+  const receipt = await good(replies[winner]);
+  await bad(replies[loser], 'already_stored');
+  const after = await json(rpc(mf, '/stats'));
+  assert.equal(BigInt(after.accepted) - BigInt(before.accepted), 1n);
+  assert.equal(BigInt(after.acceptedDebit) - BigInt(before.acceptedDebit), 8192n);
+  assert.equal(BigInt(after.reservedBytes) - BigInt(before.reservedBytes), 8192n);
+  assert.equal(before.growth.tokens - after.growth.tokens, 16384);
+  const results = (await json(rpc(mf, '/rows'))).results.filter(r => r.path === path);
+  assert.equal(results.length, 1); assert.equal(results[0].receipt, receipt);
+  assert.equal(results[0].action, await actionId(actions[winner], origin));
+  await receiptForAction(actions[winner], textBytes(receipt), origin);
+  await assert.rejects(receiptForAction(actions[loser], textBytes(receipt), origin), /wrong_receipt_action/);
+  assert.equal(await good(submit(mf, actions[winner], signatures[winner])), receipt);
+  await bad(submit(mf, actions[loser], signatures[loser]), 'already_stored');
+  await bad(submit(mf, actions[winner], 'A'.repeat(86)), 'invalid_signature');
+  await bad(submit(mf, actions[winner]), 'signature_required');
+  const retry = await json(rpc(mf, '/stats'));
+  assert.equal(retry.acceptedDebit, after.acceptedDebit); assert.equal(retry.growth.tokens, after.growth.tokens);
+  await good(rpc(mf, '/suppress', { path, suppressed: true }));
+  for (const i of [winner, loser]) await bad(submit(mf, actions[i], signatures[i]), 'suppressed');
+});
+
+test('a private reservation claims no first-publication rights; a later signed commit wins', async t => {
+  const mf = use(t), owner = await identity(mf), body = 'prepared is not published';
+  const anonymous = act('/sea', body), signed = act('/sea', body, owner.key);
+  await good(rpc(mf, '/fail'));
+  await bad(submit(mf, anonymous), 'injected_rollback');
+  const prepared = await json(rpc(mf, '/stats'));
+  const signature = await signAction(signed, owner.pair.privateKey, origin);
+  const receipt = await good(submit(mf, signed, signature));
+  const committed = await json(rpc(mf, '/stats'));
+  assert.equal(committed.reservedBytes, prepared.reservedBytes);
+  await bad(submit(mf, anonymous), 'already_stored');
+  assert.equal(await good(submit(mf, signed, signature)), receipt);
 });

@@ -228,3 +228,17 @@ Frozen Ed25519 examples in `test/vectors/ed25519.json` were generated with Pytho
 cryptography independently of this implementation. Tests cross-check them with
 Web Crypto and Node crypto. Their private seed is public test data; it is never
 a candidate production or seed-identity key.
+
+### One result, one receipt (native host)
+
+A source value is first-publication-wins. A distinct action submitting already
+published bytes receives `409 already_stored`, not a second acceptance. The
+response links to the value and its receipt; it makes no claim that the losing
+action/signature was accepted. Exact retries with valid authorization return the
+original receipt. Equal chat text may still be intentionally appended again by
+advancing the anchor.
+
+Receipt/action/evidence reads mirror the result path: for `/grove/fern.0`, use
+`/receipt/grove/fern.0`, `/action/grove/fern.0`, and `/evidence/grove/fern.0`.
+Receipt version 1 is unchanged; its original bytes live with the committed result.
+These views respect suppression and never fall back to another acceptance.

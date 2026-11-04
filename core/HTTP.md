@@ -47,14 +47,15 @@ changes; there is no hot reload.
 | `GET COLLECTION?select=latest` | 303 to the greatest available entry; 404 if that head is suppressed |
 | `GET RECORD` | Exact inert UTF-8 text |
 | `GET RECORD?view=html` | Escaped text, metadata and ordinary navigation links |
-| `GET /action/ID`, `/receipt/ID`, `/evidence/ID` | Exact action, receipt, or JSON signature evidence |
-| `GET /action?result=RECORD` | Acceptances for one available result, including a multiply-signed sea value |
+| `GET /action/RESULT_PATH`, `/receipt/RESULT_PATH`, `/evidence/RESULT_PATH` | One result’s exact action, receipt, or JSON signature evidence |
 | `GET /stats` | Admission caps, credits, accepted/debit totals, journal bytes, epoch and live upload count |
 | `POST /sea` | Anonymous exact UTF-8 source; receipt in response |
 | `POST COLLECTION` or `POST EXISTING_ENTRY` | Append, with the optional existing entry as anchor |
 
 All public reads support HEAD. Add `?view=html` to directories, collections,
-actions and receipts for their human view. `/evidence/ID` stays JSON. Query keys
+actions and receipts for their human view. `/evidence/RESULT_PATH` stays JSON. For example, `/receipt/grove/fern.0`
+is the receipt for `/grove/fern.0`. The old hash-only routes and
+`/action?result=...` are removed; there is no all-shard search fallback. Query keys
 are explicit, duplicates reject, and signed writes permit no query at all.
 `POST /plot/handle` and plot publications require a signature. Other public
 operations can be anonymous. The [protocol](PROTOCOL.md) defines exact payloads.
@@ -68,6 +69,13 @@ A successful POST is 200, with the original receipt, `Location: RESULT`, and
 links to action/receipt. Retrying identical bytes at the same destination keeps
 the same action and receipt. To intentionally repeat an append, wait for its
 receipt and use its result as the new anchor. No separate nonce or SDK is needed.
+
+For source publication, the first commit of those bytes wins. A **different**
+action submitting the same source gets `409 already_stored`, with links to its
+existing value and mirrored receipt. This is not acceptance of the losing action
+or signature. It spends attempt credit, but no new reservation or acceptance
+credit. Suppression still returns unavailable. An exact retry must still supply
+valid authorization; a public receipt is not a signature-check bypass.
 
 Only `Sprig-Signature: BASE64URL` selects signed-envelope mode. Without it the
 entire body is payload, even if it starts with an action marker. Signed mode
@@ -159,7 +167,7 @@ URL. Fixed table queries only; there is no generic RPC or arbitrary SQL endpoint
 | Endpoint | Payload / selection |
 | --- | --- |
 | `GET /admin/inspect?table=TABLE&after=CURSOR` | Named table, bounded page; optional `view=html` |
-| `GET /admin/accepted?id=ID` | One full retained acceptance, including suppressed evidence |
+| `GET /admin/result?path=RESULT_PATH` | One full retained result, including suppressed evidence |
 | `POST /admin/pause` | `{"paused":true}` |
 | `POST /admin/suppress` | `{"path":"/grove/fern.0","suppressed":true}` |
 | `POST /admin/cut` | Empty body; closes an epoch |
@@ -170,7 +178,7 @@ URL. Fixed table queries only; there is no generic RPC or arbitrary SQL endpoint
 | `GET /admin/recovery/status` | Persistent recovery status |
 | `POST /admin/restore/begin` | JSON containing canonical `header` and `footer` strings |
 | `POST /admin/restore/record?index=N` | One canonical archive line |
-| `POST /admin/restore/finish` | Empty body; validate imported history |
+| `POST /admin/restore/finish` | Empty body; bounded verification; repeat while phase is `verifying` |
 | `POST /admin/restore/release` | JSON `chain` and `confirmation: "history-reconciled"` |
 
 A separate `BACKUP_TOKEN` secret can authorize snapshot reads and `POST /admin/cut`
@@ -227,3 +235,22 @@ selection, bounded empty pages, no per-view writes/R2 reads, u64 order, slow and
 oversized bodies, shared upload slots, operator auth, suppression, corrupt R2,
 and authenticated recovery. HTML is parsed and links are followed in integration
 tests; this is not a substitute for visual browser testing.
+
+## Schema 2 transition (before deployment)
+
+This version uses database schema 2 and archive `sprig-native-snapshot/2`.
+Opening schema 1 fails before any schema changes; importing a v1 archive fails
+with `archive_version`. No local data is deleted or silently migrated.
+
+Keep an old directory/archive intact. To try the new core explicitly:
+
+```sh
+npm run dev:core -- --state .local/native-http-v2 --operator
+```
+
+For the previous reader/implementation, use a separate checkout of commit
+`353ad7fbdd212f1c5541d3c2ae6b37744e6acdb3` (PR #19), including its lockfile.
+Do not feed a v1 archive into the new restore target or reopen its directory with
+a new identity. No production migration is needed yet; a conversion tool is not
+part of this change. Public action/key/plot/receipt formats remain version 1;
+the database/archive version bump does not rewrite signed bytes or old receipts.

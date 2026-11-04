@@ -2,7 +2,7 @@ import { check, nextU64, orderedU64, textBytes, u64, utf8 } from '../src/bytes.t
 import { verifyAction, plotBindingBytes } from '../src/authority.ts';
 import { receiptForAction } from '../src/receipt.ts';
 import { formatReference, parseReference } from '../src/references.ts';
-import { State, type Accepted, type Control, type Entry, type Source } from './state.ts';
+import { State, type Control, type Result } from './state.ts';
 import type { Policy } from './policy.ts';
 import { at, bodyValue, collection } from './placement.ts';
 import { loadSource, putSource } from './objects.ts';
@@ -10,8 +10,8 @@ import { advance, canonical, complete, cutHeader, digest, end, initial, PAGE_SIZ
   parseLine, TABLES, validateHeader, validateRecord,
   type Cut, type End, type Header, type Progress, type Record, type Suppression, type Table } from './archive.ts';
 
-type Session = { phase: 'starting' | 'importing' | 'restored' | 'released'; header: Header; footer: End;
-  progress: Progress; lastHash: string | null; matchedEntries: string; witnessedSources: string };
+type Session = { phase: 'starting' | 'importing' | 'verifying' | 'restored' | 'released'; header: Header; footer: End;
+  progress: Progress; lastHash: string | null; verifiedThrough: string };
 export class Recovery {
   constructor(private ctx: DurableObjectState, private db: State, private bucket: R2Bucket, private p: Policy) {
     db.sql.exec(`CREATE TABLE IF NOT EXISTS recovery (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
@@ -41,7 +41,7 @@ export class Recovery {
       rows = this.db.sql.exec<{ key: string; epoch: string }>(`SELECT path || '!' || revision AS key, epoch
         FROM suppressions WHERE (path, revision) > (?, ?) ORDER BY path, revision LIMIT ?`, path, revision, PAGE_SIZE).toArray();
     } else {
-      const key = { sources: 'address', entries: 'path', accepted: 'id', cuts: 'epoch' }[table];
+      const key = { sources: 'address', results: 'path', cuts: 'epoch' }[table];
       const time = table === 'sources' ? 'reserved_epoch' : 'epoch';
       rows = this.db.sql.exec<{ key: string; epoch: string }>(
         `SELECT ${key} AS key, ${time} AS epoch FROM ${table} WHERE ${key} > ? ORDER BY ${key} LIMIT ?`, after, PAGE_SIZE).toArray();
@@ -70,16 +70,12 @@ export class Recovery {
     let record: Record;
     if (table === 'sources') {
       const source = this.db.source(key); check(source, 'snapshot_record_unavailable');
-      const row = { ...source };
-      if (row.published_epoch !== null && row.published_epoch > orderedU64(epoch)) {
-        row.published_epoch = null; row.submitted_at_ms = null;
-      }
-      check(row.reserved_epoch <= orderedU64(epoch), 'archive_future_fact');
-      record = { type: 'sources', row, body: row.published_epoch === null ? null : utf8(await loadSource(this.bucket, key)) };
-    } else if (table === 'entries') {
-      const row = this.db.entry(key); check(row, 'snapshot_record_unavailable'); record = { type: table, row };
-    } else if (table === 'accepted') {
-      const row = this.db.accepted(key); check(row, 'snapshot_record_unavailable'); record = { type: table, row };
+      check(source.reserved_epoch <= orderedU64(epoch), 'archive_future_fact');
+      const result = this.db.result('/sea/' + key);
+      record = { type: 'sources', row: source, body: result && result.epoch <= orderedU64(epoch)
+        ? utf8(await loadSource(this.bucket, key)) : null };
+    } else if (table === 'results') {
+      const row = this.db.result(key); check(row, 'snapshot_record_unavailable'); record = { type: table, row };
     } else if (table === 'suppressions') {
       const parts = key.split('!'); check(parts.length === 2, 'archive_cursor');
       const row = this.db.sql.exec<Suppression>('SELECT * FROM suppressions WHERE path=? AND revision=?', parts[0]!, parts[1]!).toArray()[0];
@@ -102,7 +98,7 @@ export class Recovery {
         check(c.epoch === '0' && c.accepted === '0' && c.reservedBytes === '0' && c.acceptedDebit === '0', 'restore_requires_empty_target');
         for (const table of [...TABLES, 'heads', 'recovery_sources'])
           check(this.db.sql.exec(`SELECT 1 FROM ${table} LIMIT 1`).toArray().length === 0, 'restore_requires_empty_target');
-        s = { phase: 'starting', header, footer, progress, lastHash: null, matchedEntries: '0', witnessedSources: '0' };
+        s = { phase: 'starting', header, footer, progress, lastHash: null, verifiedThrough: '' };
         c.paused = true; this.db.save(c); this.save(s);
       });
       await this.ctx.storage.sync();
@@ -116,23 +112,24 @@ export class Recovery {
   }
   status() {
     const s = this.session();
-    return s === null ? null : { phase: s.phase, count: s.progress.count, chain: s.progress.chain, expected: s.footer.chain };
+    return s === null ? null : { phase: s.phase, count: s.progress.count, chain: s.progress.chain, expected: s.footer.chain, verifiedThrough: s.verifiedThrough };
   }
-  private existing(path: string, epoch: string): Entry | null {
-    const ref = parseReference(path);
-    if (ref.kind === 'sea') {
-      const source = this.db.source(ref.address);
-      check(source?.published_epoch != null && source.published_epoch <= epoch, 'archive_missing_source'); return null;
+  private existing(path: string, epoch: string): Result {
+    const result = this.db.result(path);
+    check(result && result.epoch <= epoch, 'archive_missing_result');
+    return result;
+  }
+  private async verifyResult(a: Result, h: Header): Promise<void> {
+    if (a.source !== null) {
+      const source = this.db.source(a.source);
+      check(source && source.reserved_epoch <= a.epoch, 'archive_missing_source');
+      check(this.db.sql.exec('SELECT 1 FROM recovery_sources WHERE address=?', a.source).toArray().length === 1,
+        'archive_missing_source_body');
     }
-    check(ref.kind !== 'step' && ref.kind !== 'chat', 'archive_reference');
-    const entry = this.db.entry(path);
-    check(entry && entry.epoch <= epoch, 'archive_missing_entry'); return entry;
-  }
-  private async accepted(a: Accepted, h: Header): Promise<{ entry: boolean; witness: string | null }> {
     const body = a.source === null ? textBytes(a.body!) : await loadSource(this.bucket, a.source);
     const bytes = textBytes(a.header + utf8(body));
     const { action, receipt } = await receiptForAction(bytes, textBytes(a.receipt), h.control.origin);
-    check(utf8(action.body) === utf8(body) && receipt.action === a.id && receipt.result === h.control.origin + a.result
+    check(utf8(action.body) === utf8(body) && receipt.action === a.action && receipt.result === h.control.origin + a.path
       && receipt.acceptedAtMs === a.accepted_at_ms, 'archive_action_receipt');
     let key: string | null = null;
     if (action.author === null) {
@@ -145,26 +142,21 @@ export class Recovery {
       check(receipt.key === key && receipt.binding === verified.binding, 'archive_authority');
       this.existing(key, a.epoch);
       const author = this.existing(action.author, a.epoch);
-      if (author) check(author.controller === key && author.binding === a.author_binding, 'archive_plot_authority');
+      if (author.kind !== 'sea') check(author.controller === key && author.binding === a.author_binding, 'archive_plot_authority');
     }
     const t = action.target, value = bodyValue(action);
+    check(a.kind === t.kind && a.value === value, 'archive_result_action');
     if (t.kind === 'sea') {
-      check(a.source !== null && a.result === '/sea/' + a.source && a.body === null, 'archive_source_action');
-      this.existing(a.result, a.epoch);
-      const s = this.db.source(a.source)!;
-      return { entry: false, witness: s.published_epoch === a.epoch && s.submitted_at_ms === a.accepted_at_ms ? a.source : null };
+      check(a.source !== null && a.path === '/sea/' + a.source && a.body === null, 'archive_source_action');
+      return;
     }
     check(a.source === null, 'archive_inline_action');
-    const e = this.existing(a.result, a.epoch);
-    check(e && e.action === a.id && e.epoch === a.epoch && e.submitted_at_ms === a.accepted_at_ms
-      && e.value === value, 'archive_entry_action');
     if (value !== null) this.existing(value, a.epoch);
-    if (t.kind === 'plot') check(key !== null && e.controller === key
-      && e.binding === utf8(plotBindingBytes({ origin: h.control.origin, plot: e.path, key })), 'archive_plot_authority');
-    if (t.kind === 'publication') check(key !== null && this.existing(formatReference(t.plot), a.epoch)?.controller === key, 'archive_plot_authority');
+    if (t.kind === 'plot') check(key !== null && a.controller === key
+      && a.binding === utf8(plotBindingBytes({ origin: h.control.origin, plot: a.path, key })), 'archive_plot_authority');
+    if (t.kind === 'publication') check(key !== null && this.existing(formatReference(t.plot), a.epoch).controller === key, 'archive_plot_authority');
     if (t.kind === 'chat') this.existing(formatReference(t.subject), a.epoch);
     if (t.anchor !== null) this.existing(at(collection(t), t.kind, t.anchor), a.epoch);
-    return { entry: true, witness: null };
   }
   async importRecord(index: string, line: string) {
     u64(index);
@@ -176,10 +168,8 @@ export class Recovery {
     check(index === nextU64(s.progress.count) && u64(index) <= u64(s.footer.count), 'restore_record_order');
     const record = await validateRecord(parseLine(line), s.header);
     const next = await advance(s.progress, record, line);
-    let match = { entry: false, witness: null as string | null };
     if (record.type === 'sources' && record.body !== null)
       await putSource(this.bucket, record.row.address, textBytes(record.body));
-    if (record.type === 'accepted') match = await this.accepted(record.row, s.header);
     this.ctx.storage.transactionSync(() => {
       const r = record.row;
       if (record.type === 'suppressions') {
@@ -193,15 +183,12 @@ export class Recovery {
       // Column names come from the exact validated schema, never untrusted SQL.
       const columns = Object.keys(r), values = columns.map(k => (r as { [key: string]: SqlStorageValue })[k]!);
       this.db.sql.exec(`INSERT INTO ${record.type} (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`, ...values);
-      if (record.type === 'entries') {
+      if (record.type === 'results' && record.row.collection !== null) {
         const e = record.row;
         this.db.sql.exec(`INSERT INTO heads VALUES (?, ?) ON CONFLICT(collection) DO UPDATE SET number=MAX(heads.number, excluded.number)`, e.collection, e.number);
       }
-      if (match.entry) s.matchedEntries = nextU64(s.matchedEntries);
-      if (match.witness && this.db.sql.exec('SELECT 1 FROM recovery_sources WHERE address=?', match.witness).toArray().length === 0) {
-        this.db.sql.exec('INSERT INTO recovery_sources VALUES (?)', match.witness);
-        s.witnessedSources = nextU64(s.witnessedSources);
-      }
+      if (record.type === 'sources' && record.body !== null)
+        this.db.sql.exec('INSERT INTO recovery_sources VALUES (?)', record.row.address);
       s.progress = next; s.lastHash = lineHash; this.save(s);
     });
     await this.ctx.storage.sync(); return this.status();
@@ -212,7 +199,23 @@ export class Recovery {
       await this.ctx.storage.sync(); return this.status();
     }
     complete(s.header, s.progress, s.footer);
-    check(s.matchedEntries === s.progress.entries && s.witnessedSources === s.progress.published, 'archive_missing_acceptance');
+    if (s.phase === 'importing') {
+      s.phase = 'verifying'; this.save(s); await this.ctx.storage.sync();
+    }
+    // All rows are now present. Verify dependencies without relying on path order.
+    // Bound each call by rows and metadata bytes; persist the cursor after every result.
+    const paths = this.db.sql.exec<{ path: string }>('SELECT path FROM results WHERE path>? ORDER BY path LIMIT ?',
+      s.verifiedThrough, PAGE_SIZE).toArray();
+    let bytes = 0;
+    for (const { path } of paths) {
+      const row = this.db.result(path)!;
+      const size = textBytes(canonical(row)).length;
+      if (bytes && bytes + size > 512 * 1024) return this.status();
+      await this.verifyResult(row, s.header);
+      s.verifiedThrough = path; this.save(s); await this.ctx.storage.sync();
+      bytes += size;
+    }
+    if (paths.length === PAGE_SIZE) return this.status();
     this.ctx.storage.transactionSync(() => {
       const c: Control = structuredClone(s.header.control), now = Date.now();
       c.epoch = nextU64(s.header.epoch); c.paused = true;

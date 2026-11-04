@@ -2,7 +2,7 @@
 
 The native core can now export a coherent SQLite/R2 snapshot and restore it into
 an empty, quarantined target. This is an operator facility; public HTTP and
-operator authentication are a separate phase-0 slice. Never expose the local or
+operator authentication are provided by [HTTP.md](HTTP.md). Never expose the local or
 test adapters on a public Worker.
 
 ```sh
@@ -46,7 +46,7 @@ PUTs may add a GET. Restored SQL rows, heads and import progress also incur writ
 These are operator costs proportional to the retained history, so backup and
 restore traffic need their own operational budget and access controls.
 
-The format is canonical JSON Lines, `sprig-native-snapshot/1`: a header, ordered
+The format is canonical JSON Lines, `sprig-native-snapshot/2`: a header, ordered
 records, then an exact count and SHA-256 chain. The maximum physical line is
 2 MiB, allowing escaped control characters in a maximum-sized UTF-8 source.
 Every number that could exceed JavaScript integer precision stays decimal text.
@@ -56,9 +56,8 @@ an existing destination is never overwritten.
 | Fact | Archive representation | Why it survives |
 | --- | --- | --- |
 | Source reservation | Original size, debit, epoch and reservation time | Failed or abandoned uploads still used allowance |
-| Published source | Exact UTF-8 bytes and first-publication epoch/time | The content hash and original submission time remain checkable |
-| Grove/plot/chat entry | Original path, number, action, value, controller/binding, epoch/time | Addresses and authority remain stable, including hidden entries |
-| Accepted action | Original framing, body or source reference, signature, key/binding evidence, debit and receipt | Retries cannot become new appends; signatures remain verifiable |
+| Published source bytes | Exact UTF-8 body beside its reservation; copied only if a result exists at the cut | Hash verification survives; private preparations remain private |
+| Committed result | Path, kind, placement/controller, action, body/source, epoch/time, debit, signature evidence and original receipt | One authoritative result/receipt; uniqueness, numbering and verification survive |
 | Suppression | Complete revision history through the cut | Restoring cannot quietly expose a suppressed result |
 | Cut/control | Origin, epoch, policy, counters and bucket state | Historical accounting and earlier boundaries remain available |
 
@@ -96,14 +95,22 @@ be retried and verified. Each imported SQL record and the durable progress curso
 commit together. An exact retry of the most recently acknowledged record is
 idempotent. Restarting the process resumes from that cursor.
 
+Results are imported in path order, which need not put dependencies first.
+After import, `restoreFinish()` enters `verifying`: each call checks at most 32
+results and a soft 512 KiB of metadata (one larger bounded row is allowed).
+It saves a verification cursor after each result. Repeated calls eventually
+return `restored`; the file client drives this loop and can resume after restart.
+The quarantine remains active throughout. This avoids retaining a duplicate table
+just to put signature checks after all dependencies arrive.
+
 Before completion the target checks:
 
 - exact schemas, ordering, bounds, epochs, archive count and pinned digest;
 - source hashes, recorded byte/debit totals and accepted-action count;
 - action IDs, receipt correspondence, signatures and retained plot authority;
 - referenced sources, authors, subjects, anchors and publication ownership;
-- a matching acceptance for every numbered entry and every source's original
-  publication time;
+- one result per path and accepted action, exact receipt correspondence, and
+  a copied body for every published source (with no orphan copied bodies);
 - contiguous suppression revisions and snapshot cuts.
 
 This validates retained evidence and internal consistency. It cannot authenticate
@@ -155,3 +162,22 @@ export, and a local cost/load rehearsal. Still before launch: actually schedule
 independent backups and establish trusted-digest custody, exercise an operational
 suffix-reconciliation procedure, configure report/suppression handling, and set
 provider protections and capacity monitoring. The old store's recovery tools do not understand this schema.
+
+## Schema 2 transition (before deployment)
+
+This version uses database schema 2 and archive `sprig-native-snapshot/2`.
+Opening schema 1 fails before any schema changes; importing a v1 archive fails
+with `archive_version`. No local data is deleted or silently migrated.
+
+Keep an old directory/archive intact. To try the new core explicitly:
+
+```sh
+npm run dev:core -- --state .local/native-http-v2 --operator
+```
+
+For the previous reader/implementation, use a separate checkout of commit
+`353ad7fbdd212f1c5541d3c2ae6b37744e6acdb3` (PR #19), including its lockfile.
+Do not feed a v1 archive into the new restore target or reopen its directory with
+a new identity. No production migration is needed yet; a conversion tool is not
+part of this change. Public action/key/plot/receipt formats remain version 1;
+the database/archive version bump does not rewrite signed bytes or old receipts.

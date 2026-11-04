@@ -35,7 +35,10 @@
 - An anchor must exist in that collection. A valid old anchor allows intervening
   commits; a future/gap anchor rejects. GET creates no state.
 - Atomically commit the action's unique identity, next never-reused collection
-  number, accepted record, metadata growth debit and immutable receipt. Private
+  number, one result row (unique path and action), metadata growth debit and
+  immutable receipt. For source values, reject a different action after the first
+  publication commit, before debiting acceptance credit. Exact authorized retries
+  return the original receipt; preparations claim no public first-publication right. Private
   source storage has a separate earlier reservation so abandoned PUTs are paid.
 - Admit a signature at most once per exact action; a valid signature by itself
   does not prevent replay. Preserve consumed identities through suppression

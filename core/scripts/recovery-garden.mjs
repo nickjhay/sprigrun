@@ -73,7 +73,7 @@ export async function drill(file) {
         await assert.rejects(host.core.submit(item.bytes, item.signature), /suppressed/);
       } else {
         assert.equal(await host.core.submit(item.bytes, item.signature), item.receipt);
-        assert.equal((await host.core.evidence(item.id)).action, utf8(item.bytes));
+        assert.equal((await host.core.evidence(item.result)).action, utf8(item.bytes));
       }
     }
     for (const k of ['accepted', 'acceptedDebit', 'reservedBytes'])

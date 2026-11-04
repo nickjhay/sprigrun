@@ -94,7 +94,9 @@ export async function restore(core, file, expectedChain) {
     index = nextU64(index);
     if (BigInt(index) > BigInt(status.count)) await core.restoreRecord(index, line);
   }
-  return core.restoreFinish(); // Remains quarantined, with writes paused and zero credit.
+  let finished;
+  do { finished = await core.restoreFinish(); } while (finished.phase === 'verifying');
+  return finished; // Remains quarantined, with writes paused and zero credit.
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const [, , command, file, flag, chain] = process.argv;

@@ -61,7 +61,7 @@ test('HTTP exact UTF-8, idempotent receipt, raw MIME, HEAD and conditional seman
     assert.equal(head.status, 200);
     assert.equal(await head.text(), '');
     assert.equal((await request(mf, sent.result, { headers: { 'If-None-Match': etag } })).status, 304);
-    assert.equal(await ok(request(mf, '/receipt/' + info.action)), sent.receipt);
+    assert.equal(await ok(request(mf, '/receipt' + sent.result)), sent.receipt);
     const html = await ok(request(mf, sent.result + '?view=html'));
     const dom = parseHTML(html).document;
     assert.equal(dom.querySelectorAll('script').length, 0);
@@ -83,7 +83,7 @@ test('a raw marker stays payload; signed mode is explicit and binds the actual r
     await bad(request(mf, '/plot/fern', { method: 'POST', body: action, headers: { 'Sprig-Signature': signature } }), 400, 'wrong_destination');
     const created = await client(mf).publish('/plot/moss', action, signature);
     assert.equal(created.result, '/plot/moss.0');
-    const e = JSON.parse(await ok(request(mf, '/evidence/' + receipt(created.receipt).action)));
+    const e = JSON.parse(await ok(request(mf, '/evidence' + created.result)));
     await verifyAction(textBytes(e.action), e.signature, { keyRecord: textBytes(e.keyRecord) }, origin);
     await bad(request(mf, '/plot/moss', { method: 'POST', body: action, headers: { 'Sprig-Signature': 'A'.repeat(86) } }), 403, 'invalid_signature');
     await bad(request(mf, '/plot/moss', { method: 'POST', body: '' }), 403, 'author_required');
@@ -93,7 +93,7 @@ test('normal-admission planting covers plots, publications, chats, receipts and 
     const planted = await plantLocal(client(mf), pem), before = await rows(mf);
     assert.deepEqual(await plantLocal(client(mf), pem), planted);
     const after = await rows(mf);
-    assert.deepEqual(after.accepted, before.accepted);
+    assert.deepEqual(after.results, before.results);
     for (const path of ['/', '/explore', '/spec', '/help', '/SKILL.md', '/llms.txt', '/.well-known/agent-skills/index.json', '/.well-known/',
         '/sea?view=html', '/grove?view=html', '/plot?view=html', '/chat?view=html', '/action?view=html',
         planted.plots.moss + '?view=html', '/explore?kind=publication&under=' + encodeURIComponent(planted.plots.moss)])
@@ -106,8 +106,8 @@ test('normal-admission planting covers plots, publications, chats, receipts and 
         const href = a.getAttribute('href');
         assert.equal((await request(mf, href)).status, 200, href);
     }
-    const accepted = before.accepted.find(a => a.result === planted.messages[0]);
-    const page = parseHTML(await ok(request(mf, '/receipt/' + accepted.id + '?view=html'))).document;
+    const accepted = before.results.find(a => a.path === planted.messages[0]);
+    const page = parseHTML(await ok(request(mf, '/receipt' + accepted.path + '?view=html'))).document;
     assert.equal(page.querySelector('pre').textContent, accepted.receipt);
     assert.ok(page.querySelector('a[href="/spec/receipt/1"]'));
     assert.equal((await request(mf, '/spec/receipt/1')).status, 200);
@@ -116,9 +116,9 @@ test('suppression reaches listings, aliases, receipts and evidence; latest does 
     const mf = use(t), { source, pub } = await garden(mf), c = client(mf);
     const first = await c.publish('/chat' + pub.result, textBytes('first'));
     const last = await c.publish(first.result, textBytes('private-looking-public-text'));
-    const id = receipt(last.receipt).action;
+    const lastPath = last.result;
     await c.suppress(last.result, true);
-    for (const path of [last.result, last.result + '?view=html', '/action/' + id, '/action/' + id + '?view=html', '/receipt/' + id, '/evidence/' + id, '/chat' + pub.result + '?select=latest'])
+    for (const path of [last.result, last.result + '?view=html', '/action' + lastPath, '/action' + lastPath + '?view=html', '/receipt' + lastPath, '/evidence' + lastPath, '/chat' + pub.result + '?select=latest'])
         await bad(request(mf, path), 404);
     assert.equal(await ok(request(mf, '/chat' + pub.result)), first.result + '\n');
     const next = await c.publish(last.result, textBytes('third'));
@@ -128,7 +128,7 @@ test('suppression reaches listings, aliases, receipts and evidence; latest does 
     assert.equal(latest.headers.get('Location'), next.result + '?view=html');
     assert.equal(latest.headers.get('Cache-Control'), 'no-store');
     await c.suppress(source.result, true);
-    for (const path of [pub.result, pub.result + '?view=html', first.result, '/action/' + receipt(pub.receipt).action, '/action?result=' + encodeURIComponent(source.result)])
+    for (const path of [pub.result, pub.result + '?view=html', first.result, '/action' + pub.result, '/receipt' + source.result])
         await bad(request(mf, path), 404);
     assert.equal(await ok(request(mf, '/grove')), '');
     assert.equal(await ok(request(mf, '/chat')), '');
@@ -175,7 +175,7 @@ test('body reception is timed, bounded and prepaid; a pause during reception pre
     assert.equal(state.attempts.tokens, 9998);
     assert.equal(state.reservedBytes, '0');
     await bad(request(mf, '/__test/probe', { headers: { 'Test-Pause': '1', 'Test-Body': 'hello' } }), 503, 'writes_paused');
-    assert.equal((await rows(mf)).accepted.length, 0);
+    assert.equal((await rows(mf)).results.length, 0);
     await client(mf).pause(false);
     await put(mf, 'after');
 });
@@ -211,7 +211,7 @@ test('canonical paths, queries, methods and CORS never turn into a write bypass'
     assert.equal(preflight.headers.get('Access-Control-Allow-Origin'), '*');
     assert.match(preflight.headers.get('Access-Control-Allow-Headers'), /Sprig-Signature/);
     await bad(request(mf, '/hold', { method: 'POST' }), 404);
-    assert.equal((await rows(mf)).accepted.length, 0);
+    assert.equal((await rows(mf)).results.length, 0);
 });
 test('operator endpoints reject missing, malformed and wrong credentials without reflecting secrets', async (t) => {
     const mf = use(t);
@@ -242,7 +242,7 @@ test('a failed preparation is visible only in operator inspection, and raw reads
     assert.equal(await ok(request(mf, '/sea')), '');
     const reserved = (await inspect(mf, 'sources')).rows;
     assert.equal(reserved.length, 1);
-    assert.equal(reserved[0].published_epoch, null);
+    assert.equal((await inspect(mf, 'results')).rows.length, 0);
     await bad(request(mf, '/sea/' + reserved[0].address), 404);
     const sent = await put(mf, 'good');
     await ok(fault(mf, 'corrupt', { address: sent.result.slice(5), body: 'evil' }));
@@ -256,7 +256,7 @@ test('whole-core backup and quarantined restore work through authenticated HTTP'
     await bad(request(restored, '/sea'), 503, 'recovery_mode');
     await restore(client(restored), file, saved.footer.chain);
     assert.equal((await client(restored).restoreStatus()).phase, 'restored');
-    assert.equal((await inspect(restored, 'accepted')).rows.length, 3);
+    assert.equal((await inspect(restored, 'results')).rows.length, 3);
     await bad(request(restored, pub.result), 503, 'recovery_mode');
     await client(restored).restoreRelease(saved.footer.chain, 'history-reconciled');
     await bad(request(restored, pub.result), 503, 'recovery_mode');
@@ -281,16 +281,16 @@ test('eight stalled HTTP bodies fill the shared slots, then deadlines release th
 });
 test('suppressing a key hides retained evidence without erasing authored public messages', async (t) => {
     const mf = use(t), pem = generateKeyPairSync('ed25519').privateKey.export({ format: 'pem', type: 'pkcs8' });
-    const planted = await plantLocal(client(mf), pem), accepted = (await rows(mf)).accepted;
-    const message = planted.messages[0], id = accepted.find(a => a.result === message).id;
+    const planted = await plantLocal(client(mf), pem), accepted = (await rows(mf)).results;
+    const message = planted.messages[0], path = accepted.find(a => a.path === message).path;
     const keyPage = parseHTML(await ok(request(mf, planted.key + '?view=html'))).document;
     assert.ok(keyPage.querySelector('a[href="/spec/key/1"]'));
     await client(mf).suppress(planted.key, true);
     assert.equal((await request(mf, message)).status, 200);
-    for (const p of ['/action/', '/receipt/', '/evidence/'])
-        await bad(request(mf, p + id), 404);
-    assert.ok(!(await ok(request(mf, '/action'))).includes(id));
-    assert.equal((await rows(mf)).accepted.length, accepted.length);
+    for (const p of ['/action', '/receipt', '/evidence'])
+        await bad(request(mf, p + path), 404);
+    assert.ok(!(await ok(request(mf, '/action'))).includes(path));
+    assert.equal((await rows(mf)).results.length, accepted.length);
 });
 test('production entrypoint retains HTTP records across restart and exposes no fault router', async () => {
     const { startNative } = await import('../scripts/local-http.mjs');
@@ -308,4 +308,39 @@ test('production entrypoint retains HTTP records across restart and exposes no f
     finally {
         await host.close();
     }
+});
+
+test('duplicate source replies link one mirrored receipt, never acknowledge the losing signature', async t => {
+    const mf = use(t), c = client(mf);
+    const pair = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+    const key = (await c.publish('/sea', keyRecordBytes(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))))).result;
+    const first = await put(mf, 'shared fern');
+    const action = actionBytes({ destination: origin + '/sea', body: textBytes('shared fern'), author: key }, origin);
+    const signature = await signAction(action, pair.privateKey, origin);
+    const before = (await inspect(mf, 'control')).rows[0], beforeIO = JSON.parse(await ok(fault(mf, 'io')));
+    const duplicate = await bad(request(mf, '/sea', { method: 'POST', body: action, headers: { 'Sprig-Signature': signature } }), 409);
+    const text = await duplicate.clone().text();
+    assert.match(text, /^already_stored\n/);
+    assert.match(text, /No new publication was recorded/);
+    assert.ok(text.includes('object: ' + first.result));
+    assert.ok(text.includes('receipt: /receipt' + first.result));
+    assert.match(duplicate.headers.get('Link'), /rel="describedby"/);
+    assert.equal(duplicate.headers.get('Cache-Control'), 'no-store');
+    assert.equal(duplicate.headers.get('Location'), null);
+    const after = (await inspect(mf, 'control')).rows[0], afterIO = JSON.parse(await ok(fault(mf, 'io')));
+    for (const k of ['accepted', 'acceptedDebit', 'reservedBytes']) assert.equal(after[k], before[k]);
+    assert.equal(after.attempts.tokens, before.attempts.tokens - 1);
+    assert.equal(afterIO.puts, beforeIO.puts); assert.equal(afterIO.gets, beforeIO.gets + 1); // author key only
+    for (const prefix of ['/action', '/receipt', '/evidence']) {
+        const r = await request(mf, prefix + first.result);
+        assert.equal(r.status, 200); assert.equal(r.headers.get('Cache-Control'), 'no-store');
+        await bad(request(mf, prefix + '/' + receipt(first.receipt).action), 404); // retired hash-only route
+        await bad(request(mf, prefix + '/grove/fern'), 404); // not a concrete result
+    }
+    assert.equal(await ok(request(mf, '/receipt' + first.result)), first.receipt);
+    const doc = parseHTML(await ok(request(mf, first.result + '?view=html'))).document;
+    assert.ok(doc.querySelector(`a[href="/receipt${first.result}?view=html"]`));
+    await c.suppress(first.result, true);
+    await bad(request(mf, '/sea', { method: 'POST', body: action, headers: { 'Sprig-Signature': signature } }), 404, 'unavailable');
+    await bad(request(mf, '/receipt' + first.result), 404);
 });
