@@ -3,7 +3,7 @@ import { parseAction } from '../src/action.ts';
 import { parseReceipt } from '../src/receipt.ts';
 import { formatReference, parsePostTarget, parseReference } from '../src/references.ts';
 import { collection } from './placement.ts';
-import type { State, Accepted } from './state.ts';
+import type { State, Result } from './state.ts';
 export const PAGE_SIZE = 32;
 export const KINDS = ['sea', 'grove', 'plot', 'publication', 'chat', 'action'] as const;
 export type Item = {
@@ -29,21 +29,17 @@ export type Browse = {
 };
 /** Inspection only: fixed indexed queries; no R2 listing, user SQL or durable view state. */
 export class Inspection {
-    constructor(private db: State, private readable: (path: string) => unknown, private action: (id: string) => Accepted, private origin: string) { }
+    constructor(private db: State, private readable: (path: string) => unknown, private action: (path: string) => Result, private origin: string) { }
     describe(path: string): Item {
         this.readable(path);
-        const ref = parseReference(path);
-        if (ref.kind === 'sea') {
-            const s = this.db.source(ref.address)!;
-            return { path, kind: 'sea', bytes: s.bytes, atMs: s.submitted_at_ms! };
-        }
-        const e = this.db.entry(path)!;
-        return { path, kind: e.kind, atMs: e.submitted_at_ms, action: e.action,
-            collection: e.collection, value: e.value, controller: e.controller };
+        const e = this.db.result(path)!;
+        return { path, kind: e.kind, atMs: e.accepted_at_ms, action: e.action,
+            ...(e.kind === 'sea' ? { bytes: parseAddress(e.source!).length } : {}),
+            ...(e.collection === null ? {} : { collection: e.collection }), value: e.value, controller: e.controller };
     }
-    describeAction(id: string) {
-        const a = this.action(id), parsed = parseAction(textBytes(a.header), this.origin);
-        return { id, result: a.result, author: parsed.author, destination: parsed.path,
+    describeAction(path: string) {
+        const a = this.action(path), parsed = parseAction(textBytes(a.header), this.origin);
+        return { id: a.action, result: a.path, author: parsed.author, destination: parsed.path,
             receipt: parseReceipt(textBytes(a.receipt), this.origin), rawReceipt: a.receipt,
             signature: a.signature, keyRecord: a.key_record, plotBinding: a.author_binding };
     }
@@ -54,24 +50,11 @@ export class Inspection {
             key: string;
             path: string;
         }[];
-        if (q.kind === 'sea' || q.kind === 'action') {
-            check(q.kind === 'action' || q.container === null, 'invalid_listing');
-            if (q.after)
-                parseAddress(q.after);
-            const table = q.kind === 'sea' ? 'sources' : 'accepted', key = q.kind === 'sea' ? 'address' : 'id';
-            if (q.container !== null) {
-                this.readable(q.container);
-                rows = this.db.sql.exec<{
-                    key: string;
-                    path: string;
-                }>(`SELECT id AS key, id AS path FROM accepted WHERE result=? AND id>? ORDER BY id LIMIT ?`, q.container, q.after, PAGE_SIZE).toArray();
-            }
-            else
-                rows = this.db.sql.exec<{
-                    key: string;
-                    path: string;
-                }>(`SELECT ${key} AS key, ${key} AS path FROM ${table}
-        WHERE ${key}>? ORDER BY ${key} LIMIT ?`, q.after, PAGE_SIZE).toArray();
+        if (q.kind === 'action') {
+            check(q.container === null, 'invalid_listing');
+            if (q.after) parseReference(q.after);
+            rows = this.db.sql.exec<{ key: string; path: string }>(
+                'SELECT path AS key, path FROM results WHERE path>? ORDER BY path LIMIT ?', q.after, PAGE_SIZE).toArray();
         }
         else {
             let prefix = '/' + (q.kind === 'publication' ? 'plot' : q.kind) + '/';
@@ -93,7 +76,7 @@ export class Inspection {
                     rows = this.db.sql.exec<{
                         key: string;
                         path: string;
-                    }>(`SELECT number AS key, path FROM entries
+                    }>(`SELECT number AS key, path FROM results
             WHERE collection=? AND number>? ORDER BY number LIMIT ?`, collection(t), q.after ? orderedU64(q.after) : '', PAGE_SIZE)
                         .toArray().map(r => ({ ...r, key: String(BigInt(r.key)) }));
                     return this.page(q, rows);
@@ -104,7 +87,7 @@ export class Inspection {
             rows = this.db.sql.exec<{
                 key: string;
                 path: string;
-            }>(`SELECT path AS key, path FROM entries
+            }>(`SELECT path AS key, path FROM results
         WHERE path>=? AND path<? AND path>? ORDER BY path LIMIT ?`, prefix, prefix + '\uffff', q.after, PAGE_SIZE).toArray();
         }
         return this.page(q, rows);
@@ -118,10 +101,10 @@ export class Inspection {
             try {
                 if (q.kind === 'action') {
                     const a = this.action(row.path);
-                    items.push({ path: '/action/' + a.id, kind: 'action', atMs: a.accepted_at_ms, value: a.result });
+                    items.push({ path: '/action' + a.path, kind: 'action', atMs: a.accepted_at_ms, value: a.path });
                 }
                 else {
-                    const item = this.describe(q.kind === 'sea' ? '/sea/' + row.path : row.path);
+                    const item = this.describe(row.path);
                     if (item.kind === q.kind)
                         items.push(item);
                 }
@@ -142,8 +125,7 @@ export class Inspection {
             }>(`SELECT value FROM ${table} WHERE id=1`).toArray();
             return { table, rows: rows.map(r => JSON.parse(r.value)), after: '', more: false };
         }
-        const keys: Record<string, string> = { sources: 'address', heads: 'collection', entries: 'path',
-            accepted: 'id', cuts: 'epoch', recovery_sources: 'address' };
+        const keys: Record<string, string> = { sources: 'address', heads: 'collection', results: 'path', cuts: 'epoch', recovery_sources: 'address' };
         if (table === 'suppressions') {
             const parts = after ? after.split('!') : ['', ''];
             check(parts.length === 2, 'invalid_cursor');
@@ -158,7 +140,7 @@ export class Inspection {
         const key = Object.hasOwn(keys, table) ? keys[table]! : null;
         check(key, 'invalid_table');
         // Large bodies/evidence have a dedicated single-record endpoint, not 32 copies per table page.
-        const projection = table === 'accepted' ? 'id,result,epoch,accepted_at_ms,debit,source' : '*';
+        const projection = table === 'results' ? 'path,action,kind,collection,number,epoch,accepted_at_ms,debit,source,value,controller' : '*';
         const rows = this.db.sql.exec(`SELECT ${projection} FROM ${table} WHERE ${key}>? ORDER BY ${key} LIMIT ?`, after, PAGE_SIZE).toArray();
         return { table, rows, after: String(rows.at(-1)?.[key] ?? after), more: rows.length === PAGE_SIZE };
     }

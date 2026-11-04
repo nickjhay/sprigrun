@@ -7,23 +7,23 @@ import { parseAction } from '../src/action.ts';
 import { parseReceipt } from '../src/receipt.ts';
 import { collection } from './placement.ts';
 import { policy, type Policy } from './policy.ts';
-import type { Accepted, Control, Entry, Source } from './state.ts';
+import type { Control, Result, Source } from './state.ts';
 
-export const FORMAT = 'sprig-native-snapshot/1';
+export const FORMAT = 'sprig-native-snapshot/2';
 export const MAX_LINE = 2 * 1024 * 1024;
 export const PAGE_SIZE = 32;
-export const TABLES = ['sources', 'entries', 'accepted', 'suppressions', 'cuts'] as const;
+export const TABLES = ['sources', 'results', 'suppressions', 'cuts'] as const;
 export type Table = typeof TABLES[number];
 export type Suppression = { path: string; revision: string; epoch: string; suppressed: number; at_ms: string };
 export type Cut = { epoch: string; control: string; at_ms: string };
 export type Header = { type: 'header'; format: typeof FORMAT; epoch: string; capturedAtMs: string;
   control: Control; policy: Policy };
 export type Record = { type: 'sources'; row: Source; body: string | null }
-  | { type: 'entries'; row: Entry } | { type: 'accepted'; row: Accepted }
+  | { type: 'results'; row: Result }
   | { type: 'suppressions'; row: Suppression } | { type: 'cuts'; row: Cut };
 export type End = { type: 'end'; count: string; chain: string };
 export type Progress = { count: string; chain: string; order: string;
-  accepted: string; debit: string; reserved: string; entries: string; published: string; cuts: string };
+  accepted: string; debit: string; reserved: string; bodies: string; published: string; cuts: string };
 
 export function fields(value: unknown, names: readonly string[]): asserts value is { [key: string]: any } {
   check(value !== null && typeof value === 'object' && !Array.isArray(value), 'archive_fields');
@@ -69,7 +69,7 @@ export function validatePolicy(value: unknown): Policy {
 }
 export function validateControl(value: unknown): Control {
   fields(value, ['schema', 'origin', 'epoch', 'paused', 'growth', 'burst', 'attempts', 'accepted', 'reservedBytes', 'acceptedDebit']);
-  check(value.schema === 1 && typeof value.paused === 'boolean', 'archive_control');
+  check(value.schema === 2 && typeof value.paused === 'boolean', 'archive_control');
   canonicalOrigin(value.origin); u64(value.epoch); u64(value.accepted);
   decimal(value.reservedBytes); decimal(value.acceptedDebit);
   for (const name of ['growth', 'burst', 'attempts']) {
@@ -101,8 +101,7 @@ export function end(value: unknown): End {
 export function recordKey(record: Record): string {
   switch (record.type) {
     case 'sources': return record.row.address;
-    case 'entries': return record.row.path;
-    case 'accepted': return record.row.id;
+    case 'results': return record.row.path;
     // '!' sorts before every path character, preserving tuple order for prefixes.
     case 'suppressions': return record.row.path + '!' + record.row.revision;
     case 'cuts': return record.row.epoch;
@@ -116,44 +115,45 @@ export async function validateRecord(value: unknown, h: Header): Promise<Record>
   const row = r.row;
   if (r.type === 'sources') {
     const s = r.row;
-    fields(s, ['address','bytes','debit','reserved_epoch','reserved_at_ms','published_epoch','submitted_at_ms']);
+    fields(s, ['address','bytes','debit','reserved_epoch','reserved_at_ms']);
     const address = parseAddress(s.address, LIMITS.sourceBytes);
     integer(s.bytes); integer(s.debit, true); check(s.bytes === address.length && s.debit >= s.bytes, 'archive_source_size');
     padded(s.reserved_epoch); u64(s.reserved_at_ms);
     check(s.reserved_epoch <= orderedU64(h.epoch), 'archive_future_fact');
-    if (s.published_epoch === null) check(s.submitted_at_ms === null && r.body === null, 'archive_private_source');
-    else {
-      padded(s.published_epoch); check(s.submitted_at_ms !== null, 'archive_source_time'); u64(s.submitted_at_ms);
-      check(s.published_epoch >= s.reserved_epoch && s.published_epoch <= orderedU64(h.epoch), 'archive_future_fact');
+    if (r.body !== null) {
       smallText(r.body, LIMITS.sourceBytes);
       check(await contentAddress(textBytes(r.body)) === s.address, 'archive_source_hash');
     }
-  } else if (r.type === 'entries') {
-    const e = r.row;
-    fields(e, ['path','collection','number','kind','value','controller','binding','action','epoch','submitted_at_ms']);
-    const ref = parseReference(e.path), t = parsePostTarget(e.path);
-    check(t.kind !== 'sea' && t.anchor !== null && ref.kind !== 'step' && ref.kind !== 'chat', 'archive_entry');
-    check(e.kind === t.kind && e.collection === collection(t) && e.number === orderedU64(t.anchor), 'archive_placement');
-    parseAddress(e.action); u64(e.submitted_at_ms);
-    if (e.kind === 'plot') {
-      check(e.value === null && e.controller !== null && e.binding !== null, 'archive_plot');
-      check(parseReference(e.controller).kind === 'sea', 'archive_plot');
-      smallText(e.binding, LIMITS.recordBytes);
-      const b = parsePlotBinding(textBytes(e.binding), h.control.origin);
-      check(b.plot === e.path && b.key === e.controller, 'archive_plot');
-    } else {
-      check(e.controller === null && e.binding === null, 'archive_entry');
-      if (e.kind === 'chat') check(e.value === null, 'archive_message');
-      else check(e.value !== null && parseReference(e.value).kind === 'sea', 'archive_publication');
-    }
-  } else if (r.type === 'accepted') {
+  } else if (r.type === 'results') {
     const a = r.row;
-    fields(a, ['id','result','epoch','accepted_at_ms','debit','header','body','source','signature','key_record','author_binding','receipt']);
-    parseAddress(a.id); parseReference(a.result); integer(a.debit, true); u64(a.accepted_at_ms);
+    fields(a, ['path','collection','number','kind','value','controller','binding','action','epoch',
+      'accepted_at_ms','debit','header','body','source','signature','key_record','author_binding','receipt']);
+    const ref = parseReference(a.path);
+    parseAddress(a.action); integer(a.debit, true); u64(a.accepted_at_ms);
+    if (ref.kind === 'sea') {
+      check(a.kind === 'sea' && a.source === ref.address && a.body === null
+        && a.collection === null && a.number === null && a.value === null
+        && a.controller === null && a.binding === null, 'archive_source_action');
+    } else {
+      const t = parsePostTarget(a.path);
+      check(t.kind !== 'sea' && t.anchor !== null && ref.kind !== 'step' && ref.kind !== 'chat', 'archive_entry');
+      check(a.kind === t.kind && a.collection === collection(t) && a.number === orderedU64(t.anchor), 'archive_placement');
+      check(a.source === null, 'archive_inline_action');
+      smallText(a.body, LIMITS.sourceBytes);
+      if (a.kind === 'plot') {
+        check(a.value === null && a.controller !== null && a.binding !== null, 'archive_plot');
+        check(parseReference(a.controller).kind === 'sea', 'archive_plot');
+        smallText(a.binding, LIMITS.recordBytes);
+        const b = parsePlotBinding(textBytes(a.binding), h.control.origin);
+        check(b.plot === a.path && b.key === a.controller, 'archive_plot');
+      } else {
+        check(a.controller === null && a.binding === null, 'archive_entry');
+        if (a.kind === 'chat') check(a.value === null, 'archive_message');
+        else check(a.value !== null && parseReference(a.value).kind === 'sea', 'archive_publication');
+      }
+    }
     smallText(a.header, 2048); check(parseAction(textBytes(a.header), h.control.origin).body.length === 0, 'archive_header');
     smallText(a.receipt, LIMITS.recordBytes); parseReceipt(textBytes(a.receipt), h.control.origin);
-    if (a.source === null) smallText(a.body, LIMITS.sourceBytes);
-    else { parseAddress(a.source, LIMITS.sourceBytes); check(a.body === null, 'archive_body'); }
     for (const v of [a.key_record, a.author_binding]) if (v !== null) smallText(v, LIMITS.recordBytes);
     if (a.signature !== null) smallText(a.signature, 86);
   } else if (r.type === 'suppressions') {
@@ -176,7 +176,7 @@ export async function validateRecord(value: unknown, h: Header): Promise<Record>
 }
 export async function initial(h: Header): Promise<Progress> {
   return { count: '0', chain: await digest(canonical(h)), order: '', accepted: '0', debit: '0',
-    reserved: '0', entries: '0', published: '0', cuts: '0' };
+    reserved: '0', bodies: '0', published: '0', cuts: '0' };
 }
 export async function advance(p: Progress, r: Record, line: string): Promise<Progress> {
   const order = TABLES.indexOf(r.type) + ':' + recordKey(r);
@@ -184,15 +184,17 @@ export async function advance(p: Progress, r: Record, line: string): Promise<Pro
   const q = { ...p, count: nextU64(p.count), order, chain: await digest(p.chain + '\n' + line) };
   if (r.type === 'sources') {
     q.reserved = String(BigInt(q.reserved) + BigInt(r.row.debit));
-    if (r.row.published_epoch !== null) q.published = nextU64(q.published);
+    if (r.body !== null) q.bodies = nextU64(q.bodies);
   }
-  if (r.type === 'entries') q.entries = nextU64(q.entries);
-  if (r.type === 'accepted') { q.accepted = nextU64(q.accepted); q.debit = String(BigInt(q.debit) + BigInt(r.row.debit)); }
+  if (r.type === 'results') {
+    q.accepted = nextU64(q.accepted); q.debit = String(BigInt(q.debit) + BigInt(r.row.debit));
+    if (r.row.kind === 'sea') q.published = nextU64(q.published);
+  }
   if (r.type === 'cuts') { check(r.row.epoch === orderedU64(q.cuts), 'archive_cut_gap'); q.cuts = nextU64(q.cuts); }
   return q;
 }
 export function complete(h: Header, p: Progress, footer: End) {
   check(p.count === footer.count && p.chain === footer.chain, 'archive_incomplete');
   check(p.accepted === h.control.accepted && p.debit === h.control.acceptedDebit
-    && p.reserved === h.control.reservedBytes && p.cuts === nextU64(h.epoch), 'archive_accounting');
+    && p.bodies === p.published && p.reserved === h.control.reservedBytes && p.cuts === nextU64(h.epoch), 'archive_accounting');
 }

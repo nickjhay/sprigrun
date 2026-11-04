@@ -52,7 +52,7 @@ test('batched and individual export produce identical archives, even with later 
   await backup({ ...h.backup, snapshotBatch: undefined }, second, epoch);
   assert.deepEqual(await readFile(h.archive), await readFile(second));
   assert.equal((await h.measure()).gets - before.gets, 2);
-  assert.ok(BigInt(saved.footer.count) > 80n);
+  assert.ok(BigInt(saved.footer.count) > 40n);
   await assert.rejects(h.backup.snapshotBatch(epoch, 'sources', ''), /snapshot_sources_individual/);
 });
 test('batch byte bound makes progress with large records', async t => {
@@ -65,8 +65,8 @@ test('batch byte bound makes progress with large records', async t => {
   let after = '';
   for (let pages = 0; ; pages++) {
     assert.ok(pages < 10);
-    const page = await h.backup.snapshotBatch(epoch, 'accepted', after);
-    seen.push(...page.records.map(line => JSON.parse(line).row.id));
+    const page = await h.backup.snapshotBatch(epoch, 'results', after);
+    seen.push(...page.records.map(line => JSON.parse(line).row.action));
     if (page.done) break;
     assert.ok(page.after > after); after = page.after;
   }

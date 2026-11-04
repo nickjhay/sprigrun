@@ -79,22 +79,26 @@ profile retains the production 30-attempt and 120-read burst capacities, with
 negligible refill for reproducibility. Existing HTTP tests cover eight concurrent
 uploads and stalled-body deadlines. This is **not a production throughput test**.
 
-Measured on Linux/Node 24.22.1, 128 accepted actions per case:
+Measured on Linux/Node 24.22.1 with schema 2 (4 November 2026),
+128 accepted actions per case:
 
 | Action | SQLite bytes/action | R2 PUT/action | R2 GET/action |
 | --- | ---: | ---: | ---: |
-| New 32 KiB source | 1,152 | 1 | 0 |
+| New 32 KiB source | 1,120 | 1 | 0 |
 | Exact source retry | 0 | 0 | 0 |
-| Anonymous 1 KiB chat | 2,560 | 0 | 0 |
-| Signed 1 KiB chat, plot author | 2,528 | 0 | 1 |
-| Short publication reference | 1,088 | 0 | 0 |
-| Long publication path | 3,904 | 0 | 0 |
+| Anonymous 1 KiB chat | 2,240 | 0 | 0 |
+| Signed 1 KiB chat, plot author | 2,208 | 0 | 1 |
+| Short publication reference | 896 | 0 | 0 |
+| Long publication path | 3,328 | 0 | 0 |
 
 These are page-allocation deltas in a small local sample, not per-row billing or
 worst-case bounds. Path length, message size, insertion order, page utilization,
 keys, signatures and future schema changes matter. The long path uses seven
 32-character topic components plus the final topic. The cost model leaves SQL
 allocation estimates editable and defaults above the short-path observations.
+Compared with schema 1, the paired entry/acceptance rows and index were replaced
+by one result row. The model counts one inline message body and one result
+metadata stream per backup; JSON escaping and page overhead remain estimates.
 The rehearsal also saw exactly 30 accepted/10 refused POSTs and 120 accepted/20
 refused listing reads; those reads added no SQL pages or R2 operations. Retry
 POSTs still consume attempt credit and request/CPU cost.
@@ -134,15 +138,15 @@ full-backup source reads all contribute to R2 Class B operations.
 
 | Service age at month's start | USD/month | Journal GB at month's end |
 | --- | ---: | ---: |
-| Fresh | 5.45 | 0.78 |
-| Half a year | 5.95 | 5.51 |
-| One year | 7.14 | 10.24 — exceeds single-object capacity |
+| Fresh | 5.45 | 0.60 |
+| Half a year | 5.75 | 4.27 |
+| One year | 6.59 | 7.94 |
 
 Costs beyond the capacity limit are hypothetical until partitioned. An all-source
 scenario is about $6.53/month after one year with 2.07 GB of journal. An all-chat
-scenario reaches about 9.90 GB by the end of the month starting at half a year.
-At half a year, daily full exports raise the default estimate from $5.95 to about
-$10.00/month, before independent storage fees. The payload budget alone does not
+scenario reaches about 7.43 GB by the end of the month starting at half a year.
+At half a year, daily full exports raise the default estimate from $5.75 to about
+$8.68/month, before independent storage fees. The payload budget alone does not
 capture the cost of repeatedly copying an ever-growing journal.
 
 Independent storage/transfer, taxes, domains, frontend, WAF, logs and restores are

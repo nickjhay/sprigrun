@@ -1,3 +1,4 @@
+import { AlreadyStored } from '../host/errors.ts';
 import { check, textBytes } from '../src/bytes.ts';
 import { canonicalOrigin } from '../src/references.ts';
 import { full, refill, waitSeconds, type BucketPolicy } from '../../shared/bucket.ts';
@@ -118,6 +119,9 @@ export function json(value: unknown, status = 200) {
     return new Response(JSON.stringify(value) + '\n', { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
 }
 export function failure(error: unknown): Response {
+    if (error instanceof AlreadyStored)
+        return text(`already_stored\n\nThese exact bytes are already available.\nobject: ${error.path}\nreceipt: /receipt${error.path}\n\nNo new publication was recorded.\nHelp: /help\n`, 409,
+            { Link: `</receipt${error.path}>; rel="describedby", </help>; rel="help"` });
     const code = error instanceof Error ? error.message : '';
     let status = error instanceof HttpError ? error.status : 400;
     let retry = error instanceof HttpError ? error.retry : undefined;

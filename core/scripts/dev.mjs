@@ -43,6 +43,9 @@ async function close() { if (closing)
 process.on('SIGINT', close);
 process.on('SIGTERM', close);
 try {
+    // Open the journal even when an old planting.json would otherwise skip admission.
+    // Incompatible local state must fail visibly, never look like a ready garden.
+    await nativeClient(host.origin, { token }).inspect('control');
     if (seed) {
         let planted;
         try {

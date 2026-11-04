@@ -29,10 +29,13 @@ source availability, suppression, pause state and anchor existence at commit.
 Old and suppressed anchors count as existing entries; unknown future/gap anchors
 do not. Plot control is immutable. No guest execution runs on this path.
 
-One synchronous SQLite transaction writes:
+`results` is the authoritative table keyed by result path, with a unique action
+ID. It replaces the earlier `entries` and `accepted` tables. Receipts and evidence
+are stored in that row, not written separately to R2. One synchronous SQLite
+transaction writes:
 
 - the unique action ID and original signature/evidence;
-- the next collection number, entry and current head;
+- one result row, plus the next collection number and head for an append;
 - the acceptance timestamp and snapshot epoch;
 - the metadata growth debit and receipt;
 - first publication of a prepared source, when applicable.
@@ -41,7 +44,10 @@ There is no await, crypto, R2 operation or scan of prior history inside that
 transaction. A fault rolls all of it back. Success waits for `storage.sync()`
 before acknowledgement. Exact retries return the retained receipt; an intentional
 repeat waits for it and advances the anchor. The same bytes under different
-authors are different signed actions. Authority is resolved by key, so two plots
+authors are different signed actions. For source publication only, the first
+committed action wins: a distinct action for the same bytes gets `already_stored`
+and consumes no additional growth credit. Exact authorized retries still succeed.
+A private reservation does not claim first-publication rights. Authority is resolved by key, so two plots
 with the same controller can authorize that controller's publications, while
 their signed author labels remain distinct.
 
@@ -57,7 +63,7 @@ content address. It waits for that reservation to be durable, then performs one
 conditional R2 PUT with the digest checksum. If the condition fails, it reads
 and verifies the existing bytes before publication. A failed/ambiguous PUT leaves
 its reservation in place; retrying the same value reuses it. A committed source
-needs no new PUT for another action referring to it.
+needs no new PUT for an exact retry or a rejected duplicate publication.
 
 That reservation is necessary even when the eventual action never commits:
 otherwise an attacker could fill paid private R2 with unaccepted objects for
@@ -119,11 +125,11 @@ N+1. The retained reservation records when private allowance was paid; publicati
 records when the value became public. Tests hold an actual R2 PUT while making
 the cut. There is no claim about a particular production latency yet.
 
-Entries, accepted actions, suppression changes and cuts retain their epochs.
-Sources retain reservation and first-publication epochs separately. The exporter
-projects both at the cut and copies exact bytes, action evidence, timestamps,
+Committed results, suppression changes and cuts retain their epochs. Sources
+retain only preparation facts; the result row supplies the publication epoch/time.
+The exporter joins them at the cut and copies exact bytes, action evidence, timestamps,
 quota control and consumption identities. The restore target validates the archive
-and rebuilds heads while quarantined; interrupted imports resume durably. Original
+and rebuilds heads while quarantined; imports and bounded verification resume durably. Original
 credits remain historical, while spendable credits reset to zero. See the
 [recovery guide](../RECOVERY.md) for the format, loss drill and release boundary.
 Physical deletion and pin release are not implemented. Do not use the old

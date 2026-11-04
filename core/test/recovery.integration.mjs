@@ -57,11 +57,11 @@ test('loss of SQLite and R2: restore exact receipts, authority, times and suppre
   assert.equal(utf8(await host.core.read(garden.source)), '\ufeff1 2 + print\r\n\0🌿');
   for (const item of garden.history) {
     if (item.result === garden.hidden) {
-      await assert.rejects(host.core.evidence(item.id), /suppressed/);
+      await assert.rejects(host.core.evidence(item.result), /suppressed/);
       await assert.rejects(host.core.submit(item.bytes, item.signature), /suppressed/);
     } else {
       assert.equal(await host.core.submit(item.bytes, item.signature), item.receipt);
-      const evidence = await host.core.evidence(item.id);
+      const evidence = await host.core.evidence(item.result);
       assert.equal(evidence.action, utf8(item.bytes)); assert.equal(evidence.signature, item.signature);
     }
   }
@@ -138,19 +138,19 @@ test('archive framing rejects truncation, duplicate JSON keys, CRLF, reorder and
 
 test('recomputed checksum cannot substitute for signature, entry or acceptance validation', async t => {
   const changes = [
-    rows => { const r = rows.find(r => r.type === 'accepted' && r.row.signature); r.row.signature = 'A'.repeat(86); },
-    rows => { const r = rows.find(r => r.type === 'accepted'); r.row.accepted_at_ms = '1'; },
-    rows => { const i = rows.findIndex(r => r.type === 'entries'); rows.splice(i, 1); },
+    rows => { const r = rows.find(r => r.type === 'results' && r.row.signature); r.row.signature = 'A'.repeat(86); },
+    rows => { const r = rows.find(r => r.type === 'results'); r.row.accepted_at_ms = '1'; },
+    rows => { const r = rows.find(r => r.type === 'results' && r.row.kind === 'chat'); r.row.body += 'changed'; },
     rows => {
-      const r = rows.find(r => r.type === 'sources' && r.body?.includes('print'));
-      r.row.submitted_at_ms = '1'; // no accepting action witnesses this first-publication time
+      const r = rows.find(r => r.type === 'results' && r.row.kind === 'grove');
+      r.row.value = '/sea/' + 'a'.repeat(64) + '_1'; // valid reference grammar, wrong action value
     },
   ];
   for (const change of changes) {
     const tampered = await changed(change), core = await target(t);
     await verify(tampered.file, tampered.footer.chain); // structural validation alone is insufficient
     await assert.rejects(restore(core, tampered.file, tampered.footer.chain));
-    assert.equal((await core.restoreStatus()).phase, 'importing');
+    assert.equal((await core.restoreStatus()).phase, 'verifying');
     await assert.rejects(core.read(garden.source), /recovery_mode/);
     await assert.rejects(core.restoreRelease(tampered.footer.chain, 'history-reconciled'), /restore_not_complete/);
   }
@@ -164,12 +164,12 @@ test('a cut stays stable after later appends, visibility changes and other cuts;
   await core.suppress(planted.hidden, false);
   for (let i = 0; i < 40; i++) await core.submit(action('/grove/aaa_' + i, planted.source + '\n'));
   await core.cut();
-  const first = await core.snapshotPage(epoch, 'entries', '/grove/');
+  const first = await core.snapshotPage(epoch, 'results', '/grove/');
   assert.deepEqual(first.keys, []); assert.equal(first.done, false); assert.ok(first.after);
   const file = join(scratch, 'later-copy.jsonl');
   const b = await backup(core, file, epoch), rows = [];
   for await (const line of lines(file)) rows.push(parseLine(line));
-  assert.equal(rows.filter(r => r.type === 'entries').length, 5);
+  assert.equal(rows.filter(r => r.type === 'results').length, 7);
   assert.equal(rows.filter(r => r.type === 'suppressions' && r.row.path === planted.hidden).length, 1);
   const recovered = await target(t);
   assert.equal((await restore(recovered, file, b.footer.chain)).phase, 'restored');
@@ -197,4 +197,52 @@ test('empty history and a maximally escaped source both fit the bounded archive 
   const file = join(scratch, 'escaped.jsonl'), saved = await backup(host.core, file);
   const core = await target(t);
   assert.equal((await restore(core, file, saved.footer.chain)).phase, 'restored');
+});
+
+test('result verification is bounded, survives restart and keeps forward references quarantined', async t => {
+  const original = await localNative({ policy: drillPolicy }); t.after(() => original.dispose());
+  const g = await plant(original.core);
+  // Chats sort before their grove and source dependencies; source rows have no acceptance metadata.
+  for (let i = 0; i < 40; i++) await original.core.submit(action('/chat' + g.grove, 'batch ' + i));
+  const file = join(scratch, 'two-pass.jsonl'), b = await backup(original.core, file);
+  const directory = join(scratch, 'verify-restart');
+  let host = await localNative({ directory, policy: drillPolicy, restoring: true }); t.after(() => host.dispose());
+  const lines = (await readFile(file, 'utf8')).trimEnd().split('\n');
+  await host.core.restoreBegin(lines[0], lines.at(-1));
+  for (let i = 1; i < lines.length - 1; i++) await host.core.restoreRecord(String(i), lines[i]);
+  const partial = await host.core.restoreFinish();
+  assert.equal(partial.phase, 'verifying'); assert.ok(partial.verifiedThrough.startsWith('/chat/'));
+  await assert.rejects(host.core.restoreRelease(b.footer.chain, 'history-reconciled'), /restore_not_complete/);
+  await host.dispose(); host = await localNative({ directory, policy: drillPolicy });
+  await assert.rejects(host.core.read(g.source), /recovery_mode/);
+  assert.equal((await host.core.restoreStatus()).verifiedThrough, partial.verifiedThrough);
+  await host.dispose(); host = await localNative({ directory, policy: drillPolicy, restoring: true });
+  assert.equal((await restore(host.core, file, b.footer.chain)).phase, 'restored');
+  await host.core.restoreRelease(b.footer.chain, 'history-reconciled');
+  await host.dispose(); host = await localNative({ directory, policy: drillPolicy });
+  await host.core.pause(false);
+  for (const item of g.history) if (item.result !== g.hidden)
+    assert.equal(await host.core.submit(item.bytes, item.signature), item.receipt);
+});
+
+test('restoration retains first-publication ownership of the receipt, including a signed winner', async t => {
+  const { keyRecordBytes, signAction } = await import('../src/authority.ts');
+  const pair = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+  const original = await localNative({ policy: drillPolicy }); t.after(() => original.dispose());
+  const keyReceipt = await original.core.submit(action('/sea', utf8(keyRecordBytes(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))))));
+  const key = parseReceipt(textBytes(keyReceipt), origin).result.slice(origin.length);
+  const signed = action('/sea', 'the persistent fern', key), signature = await signAction(signed, pair.privateKey, origin);
+  const receipt = await original.core.submit(signed, signature), result = parseReceipt(textBytes(receipt), origin).result.slice(origin.length);
+  const file = join(scratch, 'first-publication.jsonl'), b = await backup(original.core, file);
+  const directory = join(scratch, 'first-publication');
+  let host = await localNative({ directory, policy: drillPolicy, restoring: true }); t.after(() => host.dispose());
+  await restore(host.core, file, b.footer.chain);
+  await host.core.restoreRelease(b.footer.chain, 'history-reconciled');
+  await host.dispose(); host = await localNative({ directory, policy: drillPolicy });
+  await host.core.pause(false);
+  const before = await host.core.stats();
+  await assert.rejects(host.core.submit(action('/sea', 'the persistent fern')), /already_stored/);
+  assert.equal(await host.core.submit(signed, signature), receipt);
+  assert.equal((await host.core.evidence(result)).receipt, receipt);
+  assert.equal((await host.core.stats()).acceptedDebit, before.acceptedDebit);
 });

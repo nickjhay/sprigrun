@@ -54,8 +54,7 @@ export class TestCoordinator extends NativeCoordinator {
     else if (command === 'rows') return {
       heads: this.db.sql.exec('SELECT * FROM heads ORDER BY collection').toArray(),
       sources: this.db.sql.exec('SELECT * FROM sources ORDER BY address').toArray(),
-      entries: this.db.sql.exec('SELECT * FROM entries ORDER BY path').toArray(),
-      accepted: this.db.sql.exec('SELECT * FROM accepted ORDER BY id').toArray(),
+      results: this.db.sql.exec('SELECT * FROM results ORDER BY path').toArray(),
       suppressions: this.db.sql.exec('SELECT * FROM suppressions ORDER BY path,revision').toArray(),
       cuts: this.db.sql.exec('SELECT * FROM cuts ORDER BY epoch').toArray(),
     };
@@ -80,7 +79,7 @@ export default {
       const value = await request.json() as any;
       if (path === '/read') return new Response(await stub.read(value.path));
       if (path === '/latest') return Response.json(await stub.latest(value.path));
-      if (path === '/evidence') return Response.json(await stub.evidence(value.id));
+      if (path === '/evidence') return Response.json(await stub.evidence(value.path));
       if (path === '/suppress') { await stub.suppress(value.path, value.suppressed); return Response.json(null); }
       if (path === '/pause') { await stub.pause(value.paused); return Response.json(null); }
       if (path === '/cut') return Response.json(await stub.cut());

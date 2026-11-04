@@ -7,12 +7,13 @@ import { check, contentAddress, copyBytes, LIMITS, nextU64, orderedU64, parseAdd
 import { assertChatFits, canonicalOrigin, formatReference, parsePostTarget, parseReference } from '../src/references.ts';
 import { parseReceipt, receiptBytes } from '../src/receipt.ts';
 import { METADATA_ALLOWANCE, policy, type Policy } from './policy.ts';
-import { State, type Control, type Entry } from './state.ts';
+import { State, type Control, type Result } from './state.ts';
 import { collection, at, bodyValue } from './placement.ts';
 import { loadSource, putSource } from './objects.ts';
 import { canonical } from './archive.ts';
 import { Recovery } from './recovery.ts';
 import { Inspection, type Browse } from './inspection.ts';
+import { AlreadyStored } from './errors.ts';
 import { handleHttp } from '../http/routes.ts';
 import { body, httpPolicy, ReadGate, HttpError, uploadHeaders, urlFor, query, type HttpPolicy } from '../http/transport.ts';
 
@@ -66,15 +67,15 @@ export class NativeCoordinator extends DurableObject<Env> {
   private visible(path: string) { check(this.db.suppression(path)?.suppressed !== 1, 'suppressed'); }
 
   /** Bounded dependency checks: publication -> source and optional plot. */
-  private readable(path: string): Entry | null {
+  private readable(path: string): Result | null {
     this.visible(path);
     const ref = parseReference(path);
     if (ref.kind === 'sea') {
-      check(this.db.source(ref.address)?.published_epoch != null, 'source_unavailable');
+      check(this.db.result(path)?.kind === 'sea', 'source_unavailable');
       return null;
     }
     check(ref.kind !== 'step' && ref.kind !== 'chat', 'unsupported_read');
-    const entry = this.db.entry(path);
+    const entry = this.db.result(path);
     check(entry, 'entry_unavailable');
     if (ref.kind === 'publication') this.readable(formatReference(ref.plot));
     if (ref.kind === 'message') this.readable(formatReference(ref.subject));
@@ -95,7 +96,7 @@ export class NativeCoordinator extends DurableObject<Env> {
     }
     if (t.kind === 'chat') this.readable(formatReference(t.subject));
     if (t.anchor !== null)
-      check(this.db.entry(at(collection(t), t.kind, t.anchor)), 'anchor_unavailable');
+      check(this.db.result(at(collection(t), t.kind, t.anchor)), 'anchor_unavailable');
   }
   private async loadSource(address: string): Promise<Uint8Array<ArrayBuffer>> {
     return loadSource(this.env.SOURCES, address);
@@ -134,17 +135,25 @@ export class NativeCoordinator extends DurableObject<Env> {
     return v;
   }
 
+  private freshSource(address: string) {
+    const path = '/sea/' + address;
+    if (this.db.result(path)) {
+      // A hidden value is not advertised through the duplicate response.
+      this.readable(path);
+      throw new AlreadyStored(path);
+    }
+  }
+
   /** Pay for a unique private source BEFORE paid R2 work. An abandoned write
    * keeps its reservation; a retry reuses it. This is separate from the atomic
    * action debit. No R2 intents/receipts: a new source normally costs one PUT.
    */
   private async prepareSource(v: Verified) {
     const address = v.source!;
-    const source = this.transaction(() => {
+    this.transaction(() => {
       const c = this.db.control(); check(!c.paused, 'writes_paused');
       this.conditions(v);
-      const prior = this.db.source(address);
-      if (prior) return prior;
+      if (this.db.source(address)) return;
       // Check room for acceptance too, but reserve only private bytes here.
       this.refresh(c);
       const bytes = Math.max(v.action.body.length, this.p.minimumDebit);
@@ -152,13 +161,12 @@ export class NativeCoordinator extends DurableObject<Env> {
       check(c.growth.tokens >= bytes + metadata
         && c.burst.tokens >= bytes + metadata, 'growth_limit');
       this.debit(c, bytes);
-      this.db.sql.exec(`INSERT INTO sources VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
+      this.db.sql.exec(`INSERT INTO sources VALUES (?, ?, ?, ?, ?)`,
         address, v.action.body.length, bytes, orderedU64(c.epoch), String(Date.now()));
       c.reservedBytes = String(BigInt(c.reservedBytes) + BigInt(bytes)); this.db.save(c);
-      return this.db.source(address)!;
     });
     await this.ctx.storage.sync();
-    if (source.published_epoch !== null) return;
+    if (this.db.result('/sea/' + address)) return;
     await putSource(this.env.SOURCES, address, v.action.body);
   }
 
@@ -186,7 +194,8 @@ export class NativeCoordinator extends DurableObject<Env> {
       const { bytes, signature } = await receive();
       const v = await this.verify(bytes, signature);
       const existing = this.db.accepted(v.id);
-      if (existing) { this.readable(existing.result); return existing.receipt; }
+      if (existing) { this.readable(existing.path); return existing.receipt; }
+      if (v.source !== null) this.freshSource(v.source);
       // Changed admission limits do not invalidate already accepted retries.
       if (v.action.target.kind === 'chat') check(v.action.body.length <= this.p.chatBytes, 'chat_size_limit');
       if (v.action.target.kind === 'sea') check(v.action.body.length <= this.p.sourceBytes, 'source_size_limit');
@@ -196,18 +205,17 @@ export class NativeCoordinator extends DurableObject<Env> {
         const c = this.db.control(); check(!c.paused, 'writes_paused');
         this.conditions(v); // Recheck every mutable condition after all awaits.
         const prior = this.db.accepted(v.id);
-        if (prior) { this.readable(prior.result); return prior.receipt; }
+        if (prior) { this.readable(prior.path); return prior.receipt; }
         const t = v.action.target, now = String(Date.now()), epoch = orderedU64(c.epoch);
+        if (v.source !== null) this.freshSource(v.source);
         const debit = Math.max(this.p.minimumDebit,
           METADATA_ALLOWANCE + (t.kind === 'sea' ? 0 : v.action.body.length));
         this.debit(c, debit);
-        let path: string;
+        let path: string, name: string | null = null, number: string | null = null, binding: string | null = null;
         if (t.kind === 'sea') {
           path = '/sea/' + v.source;
-          this.db.sql.exec(`UPDATE sources SET published_epoch=?, submitted_at_ms=?
-            WHERE address=? AND published_epoch IS NULL`, epoch, now, v.source);
         } else {
-          const name = collection(t);
+          name = collection(t);
           const head = this.db.sql.exec<{ number: string }>('SELECT number FROM heads WHERE collection=?', name).toArray()[0];
           const n = head ? nextU64(String(BigInt(head.number))) : '0';
           check(t.anchor === null || u64(n) > u64(t.anchor), 'allocation_state_invalid');
@@ -215,17 +223,16 @@ export class NativeCoordinator extends DurableObject<Env> {
           parseReference(path);
           if (t.kind !== 'chat') assertChatFits(path);
           this.visible(path); // A moderator may suppress an as-yet unallocated address.
-          const binding = t.kind === 'plot'
+          binding = t.kind === 'plot'
             ? utf8(plotBindingBytes({ origin: this.origin, plot: path, key: v.key! })) : null;
-          this.db.sql.exec('INSERT INTO entries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            path, name, orderedU64(n), t.kind, v.value, t.kind === 'plot' ? v.key : null,
-            binding, v.id, epoch, now);
+          number = orderedU64(n);
           this.db.sql.exec(`INSERT INTO heads VALUES (?, ?) ON CONFLICT(collection) DO UPDATE SET number=excluded.number`, name, orderedU64(n));
         }
         const receipt = utf8(receiptBytes({ action: v.id, result: this.origin + path,
           acceptedAtMs: now, key: v.key, binding: v.binding }, this.origin));
-        this.db.sql.exec('INSERT INTO accepted VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          v.id, path, epoch, now, debit, v.header, t.kind === 'sea' ? null : utf8(v.action.body),
+        this.db.sql.exec('INSERT INTO results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          path, name, number, t.kind, v.value, t.kind === 'plot' ? v.key : null, binding,
+          v.id, epoch, now, debit, v.header, t.kind === 'sea' ? null : utf8(v.action.body),
           v.source, v.signature, v.keyRecord, v.authorBinding, receipt);
         c.accepted = nextU64(c.accepted);
         c.acceptedDebit = String(BigInt(c.acceptedDebit) + BigInt(debit)); this.db.save(c);
@@ -265,10 +272,10 @@ export class NativeCoordinator extends DurableObject<Env> {
       try { return await run(); } finally { this.operatorActive--; }
     });
   }
-  private actionRecord(id: string) {
-    parseAddress(id);
-    const row = this.db.accepted(id); check(row, 'action_unavailable');
-    this.readable(row.result);
+  private actionRecord(path: string) {
+    parseReference(path);
+    const row = this.db.result(path); check(row, 'action_unavailable');
+    this.readable(row.path);
     const author = parseAction(textBytes(row.header), this.origin).author;
     if (author !== null) this.readable(author);
     const key = parseReceipt(textBytes(row.receipt), this.origin).key;
@@ -276,10 +283,10 @@ export class NativeCoordinator extends DurableObject<Env> {
     return row;
   }
   describe(path: string) { this.normal(); return this.inspection.describe(path); }
-  describeAction(id: string) { this.normal(); return this.inspection.describeAction(id); }
+  describeAction(path: string) { this.normal(); return this.inspection.describeAction(path); }
   browse(q: Browse) { this.normal(); return this.inspection.browse(q); }
   operatorInspect(table: string, after: string) { return this.inspection.operator(table, after); }
-  operatorRecord(id: string) { parseAddress(id); const row=this.db.accepted(id); check(row,'action_unavailable'); return row; }
+  operatorRecord(path: string) { parseReference(path); const row=this.db.result(path); check(row,'action_unavailable'); return row; }
   publicStats() {
     this.normal(); const c = this.db.control(); this.refresh(c); // Projection only: no durable view counter.
     return { origin: c.origin, epoch: c.epoch, writes_paused: c.paused, accepted_actions: c.accepted,
@@ -299,8 +306,7 @@ export class NativeCoordinator extends DurableObject<Env> {
     }
     check(entry, 'entry_unavailable');
     if (entry.binding !== null) return textBytes(entry.binding);
-    const accepted = this.db.accepted(entry.action)!;
-    return textBytes(accepted.body!);
+    return textBytes(entry.body!);
   }
   latest(path: string): string {
     this.normal();
@@ -311,18 +317,18 @@ export class NativeCoordinator extends DurableObject<Env> {
     const result = at(collection(target), target.kind, String(BigInt(head.number)));
     this.readable(result); return result; // Never fall back behind a suppressed head.
   }
-  async evidence(id: string) {
+  async evidence(path: string) {
     this.normal();
-    parseAddress(id);
-    const row = this.db.accepted(id); check(row, 'action_unavailable');
-    this.readable(row.result);
+    parseReference(path);
+    const row = this.db.result(path); check(row, 'action_unavailable');
+    this.readable(row.path);
     // Retained verification evidence must not provide an alternate route to a suppressed source.
     const action = parseAction(textBytes(row.header), this.origin);
     if (action.author !== null) this.readable(action.author);
     const keyPath = row.key_record === null ? null : '/sea/' + await contentAddress(textBytes(row.key_record));
     if (keyPath !== null) this.readable(keyPath);
     const body = row.source === null ? textBytes(row.body!) : await this.loadSource(row.source);
-    this.readable(row.result);
+    this.readable(row.path);
     if (action.author !== null) this.readable(action.author);
     if (keyPath !== null) this.readable(keyPath);
     return { action: row.header + utf8(body), signature: row.signature,
@@ -334,7 +340,7 @@ export class NativeCoordinator extends DurableObject<Env> {
   async suppress(path: string, suppressed: boolean): Promise<void> {
     this.normal();
     const ref = parseReference(path); check(typeof suppressed === 'boolean', 'invalid_suppression');
-    check(ref.kind === 'sea' || this.db.entry(path), 'entry_unavailable');
+    check(ref.kind === 'sea' || this.db.result(path), 'entry_unavailable');
     this.transaction(() => {
       const c = this.db.control(), previous = this.db.suppression(path);
       if (previous && !!previous.suppressed === suppressed) return;

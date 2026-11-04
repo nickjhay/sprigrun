@@ -37,7 +37,7 @@ class Scenario:
     source_kib: float = 32
     chat_kib: float = 1
     source_sql_kib: float = 2  # Allocation incl. indexes; estimate from local rehearsal.
-    chat_sql_overhead_kib: float = 2  # Plus two copies of the body; editable estimate.
+    chat_sql_overhead_kib: float = 2  # Plus one inline body; editable estimate.
     reads: float = 3_000_000  # Successful requests reaching this service, not browser hits.
     source_read_share: float = .5  # Others read SQL/listings; HTML is generated, not free ASSETS.
     signed_chat_share: float = .5  # One R2 key-record GET per signed action in current code.
@@ -74,7 +74,7 @@ def estimate(s: Scenario = Scenario(), prices: Prices = Prices()) -> dict:
     source_rate, chat_rate = s.source_share / source_debit, (1 - s.source_share) / chat_debit
     sources, chats = month * source_rate, month * chat_rate
     stored_sources, stored_chats = average * source_rate, average * chat_rate
-    sql_per_charge = source_rate * s.source_sql_kib * KIB + chat_rate * (s.chat_sql_overhead_kib * KIB + 2 * chat)
+    sql_per_charge = source_rate * s.source_sql_kib * KIB + chat_rate * (s.chat_sql_overhead_kib * KIB + chat)
     sql_end = (history + month) * sql_per_charge
     # End-of-month inventory for every export deliberately overestimates this month's backup traffic.
     nsource, nchat = (history + month) * source_rate, (history + month) * chat_rate
@@ -83,7 +83,6 @@ def estimate(s: Scenario = Scenario(), prices: Prices = Prices()) -> dict:
     # Source paging + one verified R2 GET/record. Metadata is batched, not one GET/row.
     export_requests = (nsource + math.floor(nsource / 32) + 1
         + math.floor((nsource + nchat) / s.metadata_batch) + 1
-        + math.floor(nchat / s.metadata_batch) + 1
         + math.floor(cuts / s.metadata_batch) + 1 + 3)  # header, cut, empty suppression page
     backups = copies * export_requests
     requests = s.reads + sources + chats + backups
@@ -96,10 +95,10 @@ def estimate(s: Scenario = Scenario(), prices: Prices = Prices()) -> dict:
         r2_gb_months=stored_sources * size / GB,
         sql_gb_months=(average * sql_per_charge + cuts * 4096) / GB,
         # Estimated row operations including indexes; backup scans proportional to records.
-        sql_rows_read=(s.reads + sources + chats + s.extra_do_requests) * 32 + copies * (2 * nsource + 2 * nchat + cuts) * 8,
+        sql_rows_read=(s.reads + sources + chats + s.extra_do_requests) * 32 + copies * (2 * nsource + nchat + cuts) * 8,
         sql_rows_written=(sources + chats + s.extra_do_requests) * 16 + copies * 4)
     costs = bill(usage, prices)
-    archive_bytes = nsource * (size + 2048) + nchat * (2048 + 2 * chat) + cuts * 4096
+    archive_bytes = nsource * (size + 2048) + nchat * (2048 + chat) + cuts * 4096
     costs['Independent backup storage (estimate; zero means excluded)'] = archive_bytes / GB * s.backup_copies * s.backup_gb_price
     capacity_days = SQL_LIMIT / (daily * sql_per_charge) if daily * sql_per_charge else None
     warnings = []
