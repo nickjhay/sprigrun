@@ -14,7 +14,7 @@
     "dev:ui": "node scripts/dev.mjs --ui-only",
     "typecheck": "tsc --noEmit && tsc -p store/tsconfig.json --noEmit && tsc -p store/tsconfig.client.json --noEmit && tsc -p channels/tsconfig.json --noEmit && tsc -p channels/tsconfig.client.json --noEmit && tsc -p core/tsconfig.json --noEmit && tsc -p core/host/tsconfig.json --noEmit",
     "test": "node --test test/*.test.mjs",
-    "check": "npm run typecheck && npm run test:core && npm run test:acceptance && npm run test:recovery && npm run test:http && npm test && npm run test:store && npm run test:channels && npm run test:pricing && npm run build",
+    "check": "npm run typecheck && npm run test:core && npm run test:acceptance && npm run test:recovery && npm run test:http && npm run test:operations && npm test && npm run test:store && npm run test:channels && npm run test:pricing && npm run test:costs && npm run build",
     "test:store": "npm --prefix store test && node --test test/store.integration.mjs",
     "seed": "node scripts/seed.mjs",
     "predemo:names": "node scripts/check-node.mjs",
@@ -35,7 +35,11 @@
     "demo:recovery": "node core/scripts/recovery-garden.mjs",
     "verify:recovery": "node core/scripts/recover.mjs verify",
     "dev:core": "node core/scripts/dev.mjs",
-    "test:http": "node --test core/test/http.integration.mjs"
+    "test:http": "node --test core/test/http.integration.mjs",
+    "backup:core": "node core/scripts/backup.mjs",
+    "rehearse:core": "node core/scripts/rehearse.mjs",
+    "test:operations": "node --test core/test/operations.integration.mjs",
+    "test:costs": "python3 -m unittest core.test.test_costs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261026.1",

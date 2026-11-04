@@ -126,6 +126,12 @@ function localOperator(request: Request, env: Env) {
         && request.headers.get('Sec-Fetch-Site') !== 'cross-site'
         && (!request.headers.has('Origin') || request.headers.get('Origin') === env.CORE_ORIGIN);
 }
+function backupAccess(request: Request, env: Env, path: string): boolean {
+    const exportRead = ['GET', 'HEAD'].includes(request.method)
+        && ['/admin/snapshot/header', '/admin/snapshot/page', '/admin/snapshot/record', '/admin/snapshot/batch'].includes(path);
+    const cut = request.method === 'POST' && path === '/admin/cut';
+    return (exportRead || cut) && operator(request, env.BACKUP_TOKEN);
+}
 async function operatorRoute(request: Request, env: Env, core: NativeCoordinator, url: URL) {
     const path = url.pathname, p = url.searchParams;
     if (['GET', 'HEAD'].includes(request.method)) {
@@ -146,7 +152,7 @@ async function operatorRoute(request: Request, env: Env, core: NativeCoordinator
         }
         if (path.startsWith('/admin/snapshot/')) {
             const method = path.slice('/admin/snapshot/'.length);
-            const names = method === 'header' ? ['epoch'] : method === 'page' ? ['epoch', 'table', 'after'] : method === 'record' ? ['epoch', 'table', 'key'] : null;
+            const names = method === 'header' ? ['epoch'] : (method === 'page' || method === 'batch') ? ['epoch', 'table', 'after'] : method === 'record' ? ['epoch', 'table', 'key'] : null;
             if (!names)
                 throw new HttpError(404, 'not_found');
             query(url, names);
@@ -154,6 +160,8 @@ async function operatorRoute(request: Request, env: Env, core: NativeCoordinator
             u64(epoch);
             if (method === 'header')
                 return text(core.snapshotHeader(epoch));
+            if (method === 'batch')
+                return json(await core.snapshotBatch(epoch, p.get('table') ?? '', p.get('after') ?? ''));
             if (method === 'page')
                 return json(core.snapshotPage(epoch, p.get('table') ?? '', p.get('after') ?? ''));
             return text(await core.snapshotRecord(epoch, p.get('table') ?? '', p.get('key') ?? ''));
@@ -161,7 +169,7 @@ async function operatorRoute(request: Request, env: Env, core: NativeCoordinator
     }
     if (request.method !== 'POST')
         throw new HttpError(404, 'not_found');
-    if (!operator(request, env.ADMIN_TOKEN))
+    if (!operator(request, env.ADMIN_TOKEN) && !backupAccess(request, env, path))
         throw new HttpError(404, 'not_found');
     const max = path === '/admin/restore/record' ? MAX_LINE : path === '/admin/restore/begin' ? 65536 : 2048;
     const known = ['/admin/pause', '/admin/suppress', '/admin/cut', '/admin/restore/begin', '/admin/restore/record', '/admin/restore/finish', '/admin/restore/release'];
@@ -203,7 +211,7 @@ export async function handleHttp(request: Request, env: Env, core: NativeCoordin
     try {
         const url = urlFor(request, env.CORE_ORIGIN);
         if (url.pathname.startsWith('/admin')) {
-            if (!operator(request, env.ADMIN_TOKEN) && !localOperator(request, env))
+            if (!operator(request, env.ADMIN_TOKEN) && !backupAccess(request, env, url.pathname) && !localOperator(request, env))
                 throw new HttpError(404, 'not_found');
             return await operatorGate(() => operatorRoute(request, env, core, url));
         }

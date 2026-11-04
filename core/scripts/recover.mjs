@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { open, link, unlink } from 'node:fs/promises';
+import { open, link, unlink, lstat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -37,8 +37,12 @@ export async function verify(file, expectedChain) {
 }
 /** The adapter may be local or authenticated operator RPC. No public route needed. */
 export async function backup(core, file, epoch) {
+  // Refuse a known collision before creating a cut or doing remote export work.
+  try { await lstat(file); throw Error('archive_exists'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
   epoch ??= await core.cut();
   const header = validateHeader(parseLine(await core.snapshotHeader(epoch)));
+  if (core.origin !== undefined) check(header.control.origin === core.origin, 'archive_origin');
   const temporary = file + '.' + randomUUID() + '.partial';
   let handle;
   try {
@@ -48,9 +52,12 @@ export async function backup(core, file, epoch) {
     for (const table of TABLES) {
       let after = '';
       for (;;) {
-        const page = await core.snapshotPage(epoch, table, after);
-        for (const key of page.keys) {
-          const line = await core.snapshotRecord(epoch, table, key);
+        const batch = table !== 'sources' && typeof core.snapshotBatch === 'function';
+        const page = batch ? await core.snapshotBatch(epoch, table, after) : await core.snapshotPage(epoch, table, after);
+        check(Array.isArray(batch ? page.records : page.keys)
+          && (batch ? page.records : page.keys).length <= 32, 'archive_page_limit');
+        for (const item of batch ? page.records : page.keys) {
+          const line = batch ? item : await core.snapshotRecord(epoch, table, item);
           const record = await validateRecord(parseLine(line), header);
           check(record.type === table, 'archive_table');
           progress = await advance(progress, record, line);

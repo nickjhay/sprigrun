@@ -38,7 +38,8 @@ export class TestCoordinator extends NativeCoordinator {
     if (this.fail) { this.fail = false; throw new Error('injected_rollback'); }
   }
   async testCommand(command: string, value: any) {
-    if (command === 'io') return { puts: this.io.puts, gets: this.io.gets, waiting: this.io.waiting };
+    if (command === 'measure') return { databaseBytes: this.db.sql.databaseSize, puts: this.io.puts, gets: this.io.gets };
+    else if (command === 'io') return { puts: this.io.puts, gets: this.io.gets, waiting: this.io.waiting };
     else if (command === 'fail-put') this.io.failPut = value.when;
     else if (command === 'corrupt') await this.env.SOURCES.put('native/sea/' + value.address, value.body);
     else if (command === 'hold-put') this.io.hold = new Promise(resolve => { this.io.release = resolve; });

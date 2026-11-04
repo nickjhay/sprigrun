@@ -182,7 +182,7 @@ test('backup publication is exclusive and leaves no partial files on failure', a
   const directory = join(scratch, 'publication');
   const { mkdir } = await import('node:fs/promises'); await mkdir(directory);
   const file = join(directory, 'keep.jsonl'); await writeFile(file, 'keep this');
-  await assert.rejects(backup(host.core, file), /EEXIST/);
+  await assert.rejects(backup(host.core, file), /archive_exists/);
   assert.equal(await readFile(file, 'utf8'), 'keep this');
   assert.deepEqual(await readdir(directory), ['keep.jsonl']);
 });

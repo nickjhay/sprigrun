@@ -49,6 +49,21 @@ export class Recovery {
     return { keys: rows.filter(r => r.epoch <= orderedU64(epoch)).map(r => r.key),
       after: rows.at(-1)?.key ?? after, done: rows.length < PAGE_SIZE };
   }
+  /** Metadata only: no speculative R2 GET when the reply budget fills. */
+  async batch(epoch: string, table: string, after: string) {
+    this.table(table); check(table !== 'sources', 'snapshot_sources_individual');
+    const page = this.page(epoch, table, after), records: string[] = [];
+    let bytes = 0, cursor = after;
+    for (const key of page.keys) {
+      const line = await this.record(epoch, table, key);
+      const size = textBytes(JSON.stringify(line)).length + 1;
+      // Always allow one bounded archive record, even if it exceeds the soft batch budget.
+      if (records.length && bytes + size > 512 * 1024)
+        return { records, after: cursor, done: false };
+      records.push(line); bytes += size; cursor = key;
+    }
+    return { records, after: page.after, done: page.done };
+  }
   async record(epoch: string, table: string, key: string): Promise<string> {
     const h = cutHeader(this.cut(epoch)); this.table(table);
     check(typeof key === 'string' && key.length <= 1024, 'archive_cursor');
