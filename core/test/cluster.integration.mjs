@@ -53,9 +53,9 @@ async function bundle(h,number=1,bases=null) {
   await finish(h.host.controller,id(number));return captureCluster(h.host,dir,id(number),bases);
 }
 async function restoreAll(h,b) {
-  await verifyCluster(b.plan,b.files,b.digest);
+  const checked=await verifyCluster(b.plan,b.files,b.digest);
   await h.controller.restoreBegin(canonical(b.plan),b.digest,'old-writers-fenced');
-  await importCluster(h,b,b.digest);
+  await checked.restore(h);
   for(let i=0;i<100;i++) {const s=await h.controller.restoreStep(b.digest);if(s.phase==='done')return s;}
   throw Error('restore_step_limit');
 }

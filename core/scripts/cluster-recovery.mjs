@@ -6,7 +6,7 @@ import { check } from '../src/bytes.ts';
 import { canonical, digest, hash } from '../host/archive.ts';
 import { clusterPlan } from '../host/cluster.ts';
 import { same } from '../host/topology.ts';
-import { backup, verifyChain, restoreChain } from './recover.mjs';
+import { backup, verifyChain, prepareRestoreChain } from './recover.mjs';
 
 async function publish(file, value) {
   const temporary = file + '.' + randomUUID() + '.partial'; let h;
@@ -36,27 +36,31 @@ export async function captureCluster(host, directory, id, bases = null) {
 }
 /** Verify every complete suffix before creating any state at the restore target. */
 export async function verifyCluster(plan, files, trustedDigest) {
+  plan = structuredClone(plan);
   hash(trustedDigest); clusterPlan(plan);
   check(await digest(canonical(plan)) === trustedDigest, 'cluster_trusted_digest_mismatch');
   check(same(Object.fromEntries(Object.keys(files).map(n=>[n,true])), plan.boundary.topology.shards), 'cluster_backup_missing_member');
+  const chains = {};
   for (const name of Object.keys(plan.finals)) {
-    const chain = await verifyChain(files[name], plan.finals[name].footer.chain), last = chain.at(-1);
+    const chain = await prepareRestoreChain(files[name], plan.finals[name].footer.chain), last = chain.final;
     check(same({header:last.header, footer:last.footer}, plan.finals[name]), 'cluster_backup_cut');
+    chains[name] = chain;
   }
-  return plan;
+  return { plan: structuredClone(plan), async restore(host) {
+    // Caller must actually fence the old writers and pin the final boundary independently.
+    // This helper deliberately does not supply the operator's fencing confirmation.
+    check((await host.controller.restoreStatus())?.digest === trustedDigest, 'cluster_restore_not_ready');
+    for (const name of Object.keys(plan.finals).sort()) {
+      const core = host.shard(name);
+      const adapter = new Proxy(core, { get(target, method) {
+        if (method === 'restoreBegin') return (header, footer, end) => target.restoreBegin(header, footer, end, trustedDigest);
+        return target[method];
+      }});
+      await chains[name].restore(adapter);
+    }
+    return host.controller.restoreStatus(); // Verification/release are explicit bounded steps.
+  } };
 }
 export async function importCluster(host, bundle, trustedDigest) {
-  const plan = await verifyCluster(bundle.plan, bundle.files, trustedDigest);
-  // Caller must actually fence the old writers and pin the final boundary independently.
-  // This helper deliberately does not supply the operator's fencing confirmation.
-  check((await host.controller.restoreStatus())?.digest === trustedDigest, 'cluster_restore_not_ready');
-  for (const name of Object.keys(plan.finals).sort()) {
-    const core = host.shard(name);
-    const adapter = new Proxy(core, { get(target, method) {
-      if (method === 'restoreBegin') return (header, footer, end) => target.restoreBegin(header, footer, end, trustedDigest);
-      return target[method];
-    }});
-    await restoreChain(adapter, bundle.files[name], plan.finals[name].footer.chain);
-  }
-  return host.controller.restoreStatus(); // Verification/release are explicit bounded steps.
+  return (await verifyCluster(bundle.plan, bundle.files, trustedDigest)).restore(host);
 }

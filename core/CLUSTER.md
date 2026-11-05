@@ -84,7 +84,11 @@ The operator verifies all member files and full-to-delta links with
 `verifyCluster(plan, files, trustedDigest)` before touching the target. Files are
 streamed; the helper retains bounded headers, not every record. Each chain still
 has the existing 1,024-file limit. The caller supplies file paths separately from
-the portable plan.
+the portable plan. Keep the returned checked plan, establish the target quarantine,
+then call its `restore(host)` method. This avoids repeated whole-chain preflight
+scans. `importCluster(host, bundle, trustedDigest)` remains a convenience that
+preflights and imports; use it when no prepared plan is already held. Remote
+record validation and final-digest checks always remain in force.
 
 ## One persistent recovery quarantine
 

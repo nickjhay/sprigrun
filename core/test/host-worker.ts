@@ -30,11 +30,17 @@ export class TestCoordinator extends NativeCoordinator {
   private release: (() => void) | null = null;
   private waiting = 0;
   private fail = false;
+  private fillOnCommit = false;
+  private fill() {
+    this.db.sql.exec('CREATE TABLE IF NOT EXISTS test_padding (bytes BLOB)');
+    this.db.sql.exec('INSERT INTO test_padding VALUES (zeroblob(1048576))');
+  }
   protected override async prepared() {
     this.waiting++;
     try { await this.hold; } finally { this.waiting--; }
   }
   protected override committing() {
+    if (this.fillOnCommit) { this.fillOnCommit = false; this.fill(); }
     if (this.fail) { this.fail = false; throw new Error('injected_rollback'); }
   }
   async testCommand(command: string, value: any) {
@@ -48,6 +54,8 @@ export class TestCoordinator extends NativeCoordinator {
     else if (command === 'release') { this.release?.(); this.release = null; this.hold = null; }
     else if (command === 'waiting') return this.waiting;
     else if (command === 'fail') this.fail = true;
+    else if (command === 'fill') this.fill();
+    else if (command === 'fill-on-commit') this.fillOnCommit = true;
     else if (command === 'delete-result') this.db.sql.exec('DELETE FROM results WHERE path=?', value.path);
     else if (command === 'delete-policy') this.db.sql.exec('DELETE FROM moderation WHERE position=?', value.position);
     else if (command === 'journal-identity') { const c = this.db.control(); c.journal = value.journal; this.db.save(c); }

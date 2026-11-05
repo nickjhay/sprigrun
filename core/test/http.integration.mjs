@@ -16,11 +16,12 @@ import { parseReceipt } from '../src/receipt.ts';
 import { signAction, verifyAction, keyRecordBytes } from '../src/authority.ts';
 import { DEFAULT_POLICY } from '../host/policy.ts';
 import { HTTP_DEFAULTS } from '../http/transport.ts';
+import { refill } from '../../shared/bucket.ts';
 const origin = 'https://sprig.run', token = 'a'.repeat(64);
 let moduleCode, scratch;
 before(async () => { scratch = await mkdtemp(join(tmpdir(), 'sprig-http-tests-')); moduleCode = (await build({ entryPoints: [resolve('core/test/http-worker.ts')], bundle: true, write: false, format: 'esm', platform: 'neutral', external: ['cloudflare:workers'] })).outputFiles[0].text; });
 after(() => rm(scratch, { recursive: true, force: true }));
-function start({ policy, httpPolicy, restoring = false, localOperator = false, logicalOrigin = origin, adminToken = token, directory } = {}) {
+function start({ policy, httpPolicy, capacity = 800_000_000, restoring = false, localOperator = false, logicalOrigin = origin, adminToken = token, directory } = {}) {
     const p = { ...DEFAULT_POLICY, attempts: { capacity: 10000, refill: 1, periodMs: 86400000 }, ...policy };
     const h = { ...HTTP_DEFAULTS, readCapacity: 10000, readRefill: 1, readPeriodMs: 86400000, ...httpPolicy };
     return new Miniflare({ cf: false, log: new Log(LogLevel.ERROR), telemetry: { enabled: false }, ...(directory ? { resourcePersistencePath: directory } : {}), workers: [{ config: {
@@ -28,6 +29,7 @@ function start({ policy, httpPolicy, restoring = false, localOperator = false, l
                     manifest: { mainModule: 'worker.mjs', modules: { 'worker.mjs': { type: 'esm', contents: moduleCode } } },
                     exports: { NativeCoordinator: { type: 'durable-object', storage: 'sqlite' } },
                     env: { CORE_ORIGIN: { type: 'text', value: logicalOrigin }, CORE_POLICY: { type: 'json', value: p }, CORE_HTTP_POLICY: { type: 'json', value: h },
+                        CORE_CAPACITY_BYTES: { type: 'json', value: capacity },
                         ADMIN_TOKEN: { type: 'text', value: adminToken }, CORE_RESTORE_MODE: { type: 'text', value: restoring ? '1' : '0' },
                         CORE_LOCAL_OPERATOR: { type: 'text', value: localOperator ? '1' : '0' },
                         SOURCES: { type: 'r2', name: 'SOURCES' }, CORE: { type: 'durable-object', worker: 'native-http-test', exportName: 'NativeCoordinator' } }
@@ -373,4 +375,48 @@ test('operator author blocks preserve historical signatures, meter rejected atte
     const rest = await c.policyPage(feed.after);
     assert.equal(rest.more, false); assert.equal(rest.after, rest.status.applied);
     assert.equal((await inspect(mf, 'moderation')).rows.length, 32);
+});
+
+test('capacity cutoff refuses uploads before body/attempt/R2 work; reads and operator work remain available', async t => {
+    const mf = use(t, { capacity: 1048576 }), c = client(mf);
+    const saved = await put(mf, 'A fern needs a little room.');
+    await ok(fault(mf, 'fill'));
+    const before = (await inspect(mf, 'control')).rows[0], io = await ok(fault(mf, 'io'));
+    const r = await bad(request(mf, '/__test/probe', { headers: { 'Test-Stall': '1' } }), 503, 'capacity_limit');
+    assert.equal(r.headers.get('Test-Body-Pulls'), '0');
+    assert.equal(r.headers.get('Retry-After'), null);
+    assert.deepEqual((await inspect(mf, 'control')).rows[0], before);
+    assert.equal(await ok(fault(mf, 'io')), io);
+    assert.equal(await ok(request(mf, '/receipt' + saved.result)), saved.receipt);
+    assert.equal(await ok(request(mf, saved.result)), 'A fern needs a little room.');
+    assert.match(await ok(request(mf, '/stats')), /journal_capacity_bytes 1048576\ncapacity_reached true/);
+    await c.suppress(saved.result, true); await c.pause(true);
+    const archive = join(scratch, 'capacity.jsonl');
+    assert.ok((await backup(c, archive)).footer.count !== '0');
+});
+test('a transaction that crosses the cutoff rolls back allocation, receipt and growth debit', async t => {
+    const mf = use(t, { capacity: 1048576 }), c = client(mf), g = await garden(mf);
+    const before = await rows(mf), state = (await inspect(mf, 'control')).rows[0];
+    const size = JSON.parse(await ok(fault(mf, 'measure'))).databaseBytes;
+    await ok(fault(mf, 'fill-on-commit'));
+    await bad(request(mf, '/chat' + g.pub.result, { method: 'POST', body: 'A leaf too far.' }), 503, 'capacity_limit');
+    assert.deepEqual(await rows(mf), before);
+    const after = (await inspect(mf, 'control')).rows[0];
+    for (const field of ['accepted', 'acceptedDebit', 'position']) assert.deepEqual(after[field], state[field], field);
+    for (const field of ['growth', 'burst']) assert.deepEqual(after[field], refill(state[field], DEFAULT_POLICY[field], after[field].atMs), field);
+    assert.equal(after.attempts.tokens, state.attempts.tokens - 1);
+    assert.equal(JSON.parse(await ok(fault(mf, 'measure'))).databaseBytes, size);
+    assert.equal((await c.publish('/chat' + g.pub.result, textBytes('A leaf that fits.'))).result, '/chat' + g.pub.result + '/0');
+});
+test('an upload already in flight cannot commit after another operation fills the journal', async t => {
+    const mf = use(t, { capacity: 1048576 }), g = await garden(mf);
+    await ok(fault(mf, 'hold'));
+    const pending = request(mf, '/chat' + g.pub.result, { method: 'POST', body: 'Still growing.' });
+    for (let n = 0; ; n++) {
+        if (JSON.parse(await ok(fault(mf, 'waiting'))) === 1) break;
+        assert.ok(n < 100); await new Promise(r => setTimeout(r, 10));
+    }
+    await ok(fault(mf, 'fill')); await ok(fault(mf, 'release'));
+    await bad(pending, 503, 'capacity_limit');
+    assert.equal((await rows(mf)).results.filter(r => r.kind === 'chat').length, 0);
 });

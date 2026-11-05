@@ -101,6 +101,9 @@ Programmatic helpers in `scripts/recover.mjs` accept local or authenticated RPC:
 - `verifyChain(files, finalChain)`: offline framing, source hashes, accounting and
   complete digest/cut linkage. Returns checked headers/footers, not all bodies.
 - `restoreChain(core, files, finalChain)`: preflight the plan, import or resume it.
+- `prepareRestoreChain(files, finalChain)`: preflight once and return checked
+  final descriptors plus `restore(core)`. Cluster recovery reuses this plan
+  after preflighting all members, without rescanning each complete chain.
 - `restore(core, file, fileChain, finalChain = fileChain)`: import one segment;
   supply the final target when more segments must follow.
 
@@ -116,6 +119,9 @@ its SQL insertion. Each imported fact, journal pointer and resume cursor commits
 together. Only an identical retry of the last imported record is accepted.
 Source hashes/lengths are checked before conditional R2 PUT. Failed PUTs and lost
 acknowledgements are resumable; they cannot duplicate accepted history or debit.
+Prepared plans retain no bodies and never replace the target's record/hash,
+authority or final-digest checks. Import rechecks framing, footer and record count;
+changed bytes after preflight cannot authorize different history.
 
 `restoreFinish()` validates the completed segment in constant work. An earlier
 segment enters `awaiting_delta`; only the pinned final digest enters `restored`.

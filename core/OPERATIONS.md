@@ -121,12 +121,38 @@ The rehearsal also saw exactly 30 accepted/10 refused POSTs and 120 accepted/20
 refused listing reads; those reads added no SQL pages or R2 operations. Retry
 POSTs still consume attempt credit and request/CPU cost.
 
-`GET /stats` now includes `journal_bytes` from SQLite's `databaseSize`. Observe it
-alongside quota debit and provider metrics. The single SQLite DO has a **10 GB
-hard limit**. Investigate at 5 GB and partition or migrate well before 8 GB; these
-are operational thresholds, not automatic alarms or admission gates. No hard
-capacity safeguard is installed by this change. A full journal can prevent
-acceptance and operator metadata writes even when R2 has ample room.
+`GET /stats` includes `journal_bytes` from SQLite's `databaseSize`,
+`journal_capacity_bytes` and `capacity_reached`. `CORE_CAPACITY_BYTES` defaults to
+800,000,000 bytes per coordinator. Set it explicitly for the selected deployment:
+Cloudflare currently documents **1 GB per SQLite object on Free, 10 GB on Paid**
+([limits](https://developers.cloudflare.com/durable-objects/platform/limits/)).
+The conservative default fits either plan. A paid deployment could choose an
+8,000,000,000-byte cutoff after reviewing measured growth and operator headroom.
+This setting is operational, not part of portable quota policy or archive bytes.
+
+Public admission, source reservation and final acceptance each check physical
+SQLite size before/after their transaction. An over-limit transaction rolls back;
+an in-flight request cannot bypass the later check. Operator moderation, pause,
+cuts and recovery retain access to the remaining provider capacity. Reads and
+receipt GETs remain available. A private source already prepared in R2 can remain
+reserved if final acceptance is refused, as for other interrupted writes.
+Restore can exceed the public cutoff but remains quarantined/paused; inspect size
+before reopening. This guard does not bound operator growth forever, account-wide
+storage, R2 bytes or cost. It is not a replacement for monitoring. Set the cutoff
+well below the provider limit and investigate growth before reaching it.
+
+### First public preview
+
+Use the existing single-shard Worker. Keep the cluster implementation and loss
+drills as a tested growth path; public sharded routing and collection movement
+are deferred. Before opening writes, choose and rehearse independent backup
+custody/cadence, reporting operations, seed key custody and the recovery promise.
+An asynchronous backup cannot reveal an unknown newer acknowledged suffix. Do
+not resume old numbered collections from an uncertain prefix and silently reuse
+identities. Resolving that uncertainty, choosing a new namespace after loss, or
+requiring independent durable evidence before acknowledgements are different
+operational promises; none is selected automatically here. No backup scheduler,
+external copy destination or deployment is configured by this change.
 
 ## Editable native-core cost model
 

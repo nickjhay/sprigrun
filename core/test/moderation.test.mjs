@@ -86,3 +86,29 @@ test('concurrent refreshes coalesce; malformed and reordered pages cannot advanc
     assert.equal(replica.log.position(), '1');
   }
 });
+
+test('follower diagnostics distinguish unknown, partial catch-up, failed refresh and recovery without durable writes', async t => {
+  const authority = journal(t), replica = journal(t);
+  for (let n = 1; n <= 33; n++) authority.apply([change(n, n % 2)]);
+  let unavailable = false, badPage = false, failApply = false;
+  const local = { position: () => replica.log.position(), apply: async c => { if (failApply) throw Error('private storage details'); replica.apply(c); } };
+  const follower = new PolicyFollower(local, async after => {
+    if (unavailable) throw Error('private credentials');
+    return badPage ? { ...authority.log.page(after), after: '999' } : authority.log.page(after);
+  });
+  assert.equal(follower.status().lastSuccessMs, null);
+  await follower.tick(0);
+  assert.equal(replica.log.position(), '32'); assert.equal(follower.status().observedThrough, '33');
+  assert.equal(follower.status().nextAttemptMs, 0); assert.ok(follower.status().lastSuccessMs > 0);
+  const success = follower.status().lastSuccessMs, position = replica.db.control().position;
+  unavailable = true; await assert.rejects(follower.tick(1));
+  assert.equal(follower.status().lastError, 'pull_failed'); assert.equal(follower.status().lastSuccessMs, success);
+  assert.equal(replica.db.control().position, position); assert.equal(follower.status().busy, false);
+  unavailable = false; badPage = true; await assert.rejects(follower.tick(60001));
+  assert.equal(follower.status().lastError, 'invalid_page');
+  badPage = false; failApply = true; await assert.rejects(follower.tick(120001));
+  assert.equal(follower.status().lastError, 'apply_failed'); assert.equal(replica.log.position(), '32');
+  failApply = false; await follower.tick(180001);
+  assert.equal(follower.status().lastError, null); assert.equal(replica.log.position(), '33');
+  assert.equal(new PolicyFollower(local, async after => authority.log.page(after)).status().lastSuccessMs, null);
+});

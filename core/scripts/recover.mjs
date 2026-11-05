@@ -86,14 +86,16 @@ export async function incrementalBackup(core, file, baseFile, baseChain, epoch) 
 async function importChecked(core, file, checked, target) {
   const status = await core.restoreBegin(canonical(checked.header), canonical(checked.footer), target);
   if (status.phase !== 'importing') return status;
-  let index = '0', first = true;
+  let index = '0', first = true, ended = false;
   for await (const line of lines(file)) {
     if (first) { check(line === canonical(checked.header), 'archive_changed'); first = false; continue; }
+    check(!ended, 'archive_trailing_data');
     const value = parseLine(line);
-    if (value.type === 'end') { check(line === canonical(checked.footer), 'archive_changed'); break; }
+    if (value.type === 'end') { check(line === canonical(checked.footer), 'archive_changed'); ended = true; continue; }
     index = nextU64(index);
     if (BigInt(index) > BigInt(status.count)) await core.restoreRecord(index, line);
   }
+  check(ended && index === checked.footer.count, 'archive_changed');
   return core.restoreFinish(); // Still quarantined; incomplete suffixes explicitly wait.
 }
 export async function restore(core, file, expectedChain, targetChain = expectedChain) {
@@ -115,13 +117,21 @@ export async function verifyChain(files, target) {
   return checked;
 }
 export async function restoreChain(core, files, target) {
-  // Verify the complete plan and its independently trusted end before mutating the target.
-  const checked = await verifyChain(files, target), status = await core.restoreStatus();
-  const start = status === null ? 0 : checked.findIndex(p => p.footer.chain === status.expected);
-  check(start >= 0 && (status === null || status.target === target), 'different_restore_active');
-  let result;
-  for (let i = start; i < files.length; i++) result = await importChecked(core, files[i], checked[i], target);
-  return result;
+  return (await prepareRestoreChain(files, target)).restore(core);
+}
+/** Preflight once, then retain only bounded descriptors. Import still checks every record remotely. */
+export async function prepareRestoreChain(files, target) {
+  check(Array.isArray(files) && files.length > 0 && files.length <= 1024, 'archive_chain_limit');
+  files = [...files];
+  const checked = await verifyChain(files, target);
+  return { final: structuredClone(checked.at(-1)), async restore(core) {
+    const status = await core.restoreStatus();
+    const start = status === null ? 0 : checked.findIndex(p => p.footer.chain === status.expected);
+    check(start >= 0 && (status === null || status.target === target), 'different_restore_active');
+    let result;
+    for (let i = start; i < files.length; i++) result = await importChecked(core, files[i], checked[i], target);
+    return result;
+  } };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const [, , command, ...args] = process.argv;
