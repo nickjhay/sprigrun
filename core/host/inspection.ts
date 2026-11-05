@@ -29,21 +29,21 @@ export type Browse = {
 };
 /** Inspection only: fixed indexed queries; no R2 listing, user SQL or durable view state. */
 export class Inspection {
-    constructor(private db: State, private readable: (path: string) => unknown, private action: (path: string) => Result, private origin: string) { }
-    describe(path: string): Item {
-        this.readable(path);
+    constructor(private db: State, private readable: (path: string) => Promise<unknown>, private action: (path: string) => Promise<Result>, private origin: string) { }
+    async describe(path: string): Promise<Item> {
+        await this.readable(path);
         const e = this.db.result(path)!;
         return { path, kind: e.kind, atMs: e.accepted_at_ms, action: e.action,
             ...(e.kind === 'sea' ? { bytes: parseAddress(e.source!).length } : {}),
             ...(e.collection === null ? {} : { collection: e.collection }), value: e.value, controller: e.controller };
     }
-    describeAction(path: string) {
-        const a = this.action(path), parsed = parseAction(textBytes(a.header), this.origin);
+    async describeAction(path: string) {
+        const a = await this.action(path), parsed = parseAction(textBytes(a.header), this.origin);
         return { id: a.action, result: a.path, author: parsed.author, destination: parsed.path,
             receipt: parseReceipt(textBytes(a.receipt), this.origin), rawReceipt: a.receipt,
             signature: a.signature, keyRecord: a.key_record, plotBinding: a.author_binding };
     }
-    browse(q: Browse): Page {
+    async browse(q: Browse): Promise<Page> {
         check(KINDS.includes(q.kind as typeof KINDS[number]), 'invalid_listing');
         check(typeof q.after === 'string' && q.after.length <= 512, 'invalid_cursor');
         let rows: {
@@ -62,15 +62,15 @@ export class Inspection {
                 const t = parsePostTarget(q.container);
                 if (q.kind === 'publication' && t.kind === 'plot' && t.anchor !== null) {
                     // A plot root selects all its publication topics.
-                    this.readable(q.container);
+                    await this.readable(q.container);
                     prefix = q.container + '/';
                 }
                 else {
                     check(t.kind !== 'sea' && t.kind === q.kind && t.anchor === null, 'invalid_listing');
                     if (t.kind === 'chat')
-                        this.readable(formatReference(t.subject));
+                        await this.readable(formatReference(t.subject));
                     if (t.kind === 'publication')
-                        this.readable(formatReference(t.plot));
+                        await this.readable(formatReference(t.plot));
                     if (q.after)
                         u64(q.after);
                     rows = this.db.sql.exec<{
@@ -92,19 +92,19 @@ export class Inspection {
         }
         return this.page(q, rows);
     }
-    private page(q: Browse, rows: {
+    private async page(q: Browse, rows: {
         key: string;
         path: string;
-    }[]): Page {
+    }[]): Promise<Page> {
         const items: Item[] = [];
         for (const row of rows) {
             try {
                 if (q.kind === 'action') {
-                    const a = this.action(row.path);
+                    const a = await this.action(row.path);
                     items.push({ path: '/action' + a.path, kind: 'action', atMs: a.accepted_at_ms, value: a.path });
                 }
                 else {
-                    const item = this.describe(row.path);
+                    const item = await this.describe(row.path);
                     if (item.kind === q.kind)
                         items.push(item);
                 }

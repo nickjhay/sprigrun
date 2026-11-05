@@ -1,25 +1,13 @@
+import { manifest, clusterPlan, type ClusterPlan, type Manifest } from './cluster.ts';
 import { DurableObject } from 'cloudflare:workers';
-import { check, nextU64, textBytes } from '../src/bytes.ts';
-import { canonical, fields, validateHeader, type Header } from './archive.ts';
+import { check, nextU64 } from '../src/bytes.ts';
+import { canonical, digest, parseLine, validateHeader, type Header } from './archive.ts';
 import { identifier, topology, same, type Topology } from './topology.ts';
 import type { NativeCoordinator } from './coordinator.ts';
 
-export type Manifest = { format: 'sprig-barrier/1'; topology: Topology; id: string; epoch: string;
-  cuts: Record<string, Header> };
-export function manifest(value: unknown): Manifest {
-  fields(value, ['format', 'topology', 'id', 'epoch', 'cuts']);
-  check(value.format === 'sprig-barrier/1', 'barrier_manifest_version');
-  const t = topology(value.topology); identifier(value.id); nextU64(value.epoch);
-  fields(value.cuts, Object.keys(t.shards));
-  for (const name of Object.keys(t.shards)) {
-    const h = validateHeader(value.cuts[name]), c = h.control;
-    check(h.base === null && h.epoch === value.epoch && same(c.partition, { topology: t, shard: name })
-      && same(c.barrier, { id: value.id, epoch: value.epoch, phase: 'held', manifest: null }), 'barrier_cut_mismatch');
-  }
-  check(textBytes(canonical(value)).length <= 128 * 1024, 'barrier_manifest_limit');
-  return value as Manifest;
-}
-export interface BarrierEnv { CORE_TOPOLOGY: Topology; CORE_SHARDS: DurableObjectNamespace<NativeCoordinator> }
+export { manifest, type Manifest } from './cluster.ts';
+export interface BarrierEnv { CORE_RESTORE_MODE?: string; SOURCES: R2Bucket; CORE_TOPOLOGY: Topology; CORE_SHARDS: DurableObjectNamespace<NativeCoordinator> }
+type ClusterRestore = { phase: 'starting' | 'import' | 'verify' | 'history' | 'publish' | 'release' | 'done'; history: string; cuts: Record<string, Header>; plan: ClusterPlan; digest: string; next: number };
 type Registry = { topology: Topology; journals: Record<string, string>; epoch: string; active: string | null };
 export type Round = { id: string; epoch: string; phase: 'hold' | 'cut' | 'publish' | 'release' | 'done';
   next: number; cuts: Record<string, Header> };
@@ -32,11 +20,15 @@ export class NativeBarrier extends DurableObject<BarrierEnv> {
   constructor(ctx: DurableObjectState, env: BarrierEnv) {
     super(ctx, env); this.t = topology(env.CORE_TOPOLOGY);
     const sql = ctx.storage.sql;
+    if (sql.exec("SELECT 1 FROM sqlite_master WHERE name='cluster_restore'").toArray().length) {
+      const r = this.restoreState(); if (r) check(same(r.plan.boundary.topology, this.t), 'topology_changed');
+    }
     if (sql.exec("SELECT 1 FROM sqlite_master WHERE name='barrier_registry'").toArray().length) {
       const c = this.registry(); if (c) check(same(c.topology, this.t), 'topology_changed');
     }
     sql.exec(`CREATE TABLE IF NOT EXISTS barrier_registry (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS barrier_rounds (id TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS barrier_rounds (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS cluster_restore (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);`);
   }
   private registry(): Registry | null {
     const r = this.ctx.storage.sql.exec<{value:string}>('SELECT value FROM barrier_registry WHERE id=1').toArray()[0];
@@ -49,9 +41,11 @@ export class NativeBarrier extends DurableObject<BarrierEnv> {
     const r = this.ctx.storage.sql.exec<{value:string}>('SELECT value FROM barrier_rounds WHERE id=?', id).toArray()[0];
     return r ? JSON.parse(r.value) : null;
   }
-  configuration() { return this.registry(); }
+  private normal() { const s = this.restoreState(); check(this.env.CORE_RESTORE_MODE !== '1' && (!s || s.phase === 'done'), 'recovery_mode'); }
+  configuration() { this.normal(); return this.registry(); }
   private peer(name: string) { return this.env.CORE_SHARDS.getByName(name); }
   async initialize() {
+    this.normal();
     check(!this.busy, 'barrier_busy'); this.busy = true;
     try {
       const prior = this.registry(); if (prior) { await this.ctx.storage.sync(); return prior; }
@@ -67,6 +61,7 @@ export class NativeBarrier extends DurableObject<BarrierEnv> {
     } finally { this.busy = false; }
   }
   async start(id: string) {
+    this.normal();
     identifier(id); check(!this.busy, 'barrier_busy');
     const c = this.registry(); check(c, 'barrier_not_initialized');
     const prior = this.status(id); if (prior) { await this.ctx.storage.sync(); return prior; }
@@ -90,6 +85,7 @@ export class NativeBarrier extends DurableObject<BarrierEnv> {
   protected async afterRemote(_phase: string, _name: string): Promise<void> {}
   protected async afterCommit(_phase: string): Promise<void> {}
   async step(id: string): Promise<Round> {
+    this.normal();
     identifier(id); check(!this.busy, 'barrier_busy'); this.busy = true;
     try {
       const c = this.registry(), r = this.status(id); check(c && r, 'barrier_not_started');
@@ -123,4 +119,96 @@ export class NativeBarrier extends DurableObject<BarrierEnv> {
       await this.ctx.storage.sync(); await this.afterCommit(phase); return r;
     } finally { this.busy = false; }
   }
+  private restoreState(): ClusterRestore | null {
+    const row = this.ctx.storage.sql.exec<{value:string}>('SELECT value FROM cluster_restore WHERE id=1').toArray()[0];
+    return row ? JSON.parse(row.value) : null;
+  }
+  private saveRestore(s: ClusterRestore) { this.ctx.storage.sql.exec('INSERT OR REPLACE INTO cluster_restore VALUES(1, ?)', canonical(s)); }
+  restoreStatus() { const s = this.restoreState(); return s && { phase: s.phase, digest: s.digest, next: s.next }; }
+  async restorePlan(hash: string): Promise<ClusterPlan> {
+    const s = this.restoreState(); check(s && s.digest === hash && s.phase !== 'starting', 'cluster_restore_not_ready');
+    await this.ctx.storage.sync(); return s.plan;
+  }
+  async restorePublished(hash: string) {
+    const s = this.restoreState(); check(s && ['release', 'done'].includes(s.phase), 'cluster_restore_not_verified');
+    return this.restorePlan(hash);
+  }
+  async restoreBegin(line: string, trustedDigest: string, confirmation: string) {
+    check(this.env.CORE_RESTORE_MODE === '1', 'restore_mode_required');
+    check(confirmation === 'old-writers-fenced', 'restore_history_confirmation');
+    check(!this.busy, 'barrier_busy'); this.busy = true;
+    try {
+      check(await digest(line) === trustedDigest, 'cluster_trusted_digest_mismatch');
+      const plan = clusterPlan(parseLine(line)); check(same(plan.boundary.topology, this.t), 'restore_partition_mismatch');
+      let s = this.restoreState();
+      if (s) check(s.digest === trustedDigest && same(s.plan, plan), 'different_restore_active');
+      else {
+        check(this.registry() === null && !this.ctx.storage.sql.exec('SELECT 1 FROM barrier_rounds LIMIT 1').toArray().length, 'restore_requires_empty_target');
+        for (const name of Object.keys(this.t.shards).sort()) await this.peer(name).clusterPristine();
+        s = { phase: 'starting', history: '0', cuts: {}, plan, digest: trustedDigest, next: 0 }; this.saveRestore(s); await this.ctx.storage.sync();
+      }
+      if (s.phase === 'starting') {
+        // Exactly once for the entire shared bucket, before authorizing ANY member import.
+        check((await this.env.SOURCES.list({ limit: 1 })).objects.length === 0, 'restore_requires_empty_bucket');
+        s.phase = 'import'; this.saveRestore(s); await this.ctx.storage.sync();
+      }
+      return this.restoreStatus();
+    } finally { this.busy = false; }
+  }
+  async restoreStep(hash: string) {
+    check(this.env.CORE_RESTORE_MODE === '1', 'restore_mode_required');
+    check(!this.busy, 'barrier_busy'); this.busy = true;
+    try {
+      const s = this.restoreState(); check(s && s.digest === hash && s.phase !== 'starting', 'cluster_restore_not_ready');
+      if (s.phase === 'done') return this.restoreStatus();
+      const names = Object.keys(this.t.shards).sort(), phase = s.phase;
+      if (phase === 'history') {
+        const name = names[s.next]!;
+        const h = validateHeader(JSON.parse(await this.peer(name).clusterCut(s.history, hash)));
+        check(h.control.journal === s.plan.boundary.cuts[name]!.control.journal, 'barrier_journal_changed');
+        s.cuts[name] = h; await this.afterRemote('restore-history', name); s.next++;
+        this.ctx.storage.transactionSync(() => {
+          if (s.next === names.length) {
+            const id = h.control.barrier!.id;
+            const m = manifest({format:'sprig-barrier/1', topology:this.t, id, epoch:s.history, cuts:s.cuts});
+            check(this.status(id) === null, 'archive_barrier_reused');
+            this.save({id, epoch:s.history, phase:'done', next:0, cuts:m.cuts});
+            s.history = nextU64(s.history); s.next = 0; s.cuts = {};
+            if (s.history === s.plan.boundary.epoch) s.phase = 'publish';
+          }
+          this.saveRestore(s);
+        });
+      } else if (phase === 'publish') {
+        const m = s.plan.boundary;
+        check(this.status(m.id) === null, 'archive_barrier_reused');
+        const c: Registry = { topology: this.t, epoch: m.epoch, active: m.id,
+          journals: Object.fromEntries(names.map(name => [name, m.cuts[name]!.control.journal])) };
+        this.ctx.storage.transactionSync(() => {
+          this.saveRegistry(c); this.save({ id: m.id, epoch: m.epoch, phase: 'release', next: 0, cuts: m.cuts });
+          s.phase = 'release'; s.next = 0; this.saveRestore(s);
+        });
+      } else {
+        const name = names[s.next]!;
+        let done = true;
+        if (phase === 'import') await this.peer(name).clusterReady(hash);
+        else if (phase === 'verify') done = (await this.peer(name).clusterVerify(hash)).done;
+        else await this.peer(name).clusterRelease(hash);
+        await this.afterRemote('restore-' + phase, name);
+        if (done) s.next++;
+        if (s.next === names.length) {
+          s.next = 0; s.phase = phase === 'import' ? 'verify' : phase === 'verify' ? (s.plan.boundary.epoch === '0' ? 'publish' : 'history') : 'done';
+        }
+        this.ctx.storage.transactionSync(() => {
+          if (s.phase === 'done') {
+            const c = this.registry()!, r = this.status(s.plan.boundary.id)!;
+            c.epoch = nextU64(c.epoch); c.active = null; r.phase = 'done'; r.next = 0;
+            this.saveRegistry(c); this.save(r);
+          }
+          this.saveRestore(s);
+        });
+      }
+      await this.ctx.storage.sync(); await this.afterCommit('restore-' + phase); return this.restoreStatus();
+    } finally { this.busy = false; }
+  }
+
 }

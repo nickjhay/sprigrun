@@ -537,3 +537,11 @@ test('a late policy with an older issue epoch cannot enter an already closed sna
   const next = await json(rpc(mf, '/snapshotPage', { epoch: nextEpoch, after: cut }));
   assert.equal(next.keys.length, 2); // Late policy and the next cut.
 });
+
+
+test('moderation cannot reserve an unallocated numbered entry on a standalone core', async t => {
+  const mf = use(t);
+  await bad(rpc(mf, '/suppress', {path:'/grove/unallocated.0',suppressed:true}), 'entry_unavailable');
+  const value = await source(mf, 'A free place.');
+  assert.equal(await accept(mf, act('/grove/unallocated', value + '\n')), '/grove/unallocated.0');
+});

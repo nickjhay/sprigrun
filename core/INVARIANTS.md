@@ -111,7 +111,7 @@ operations. The protocol demo and frozen fixtures make none of those claims.
 
 - Result, receipt and evidence paths derive the same stable logical owner. Source
   preparation stays with that source; numbered results stay with their collection.
-  This version still has one physical coordinator and no cross-shard resolver.
+  Public HTTP still uses one coordinator; the local cluster enforces fixed ownership.
 - Policy application and cursor updates commit together. Gaps/conflicting history
   reject; a delayed identical change cannot replace a newer decision.
 - Refresh work is bounded to 32 changes per tick, coalesces concurrent calls and
@@ -119,7 +119,7 @@ operations. The protocol demo and frozen fixtures make none of those claims.
 - A block does not hide historical signatures. A hide does not revoke signing
   authority. Public evidence and exact-retry receipts cannot bypass hiding.
 - Direct result reads use retained accepted state, never a discovery listing as
-  proof of acceptance. Future cross-owner reads must retain this trust boundary.
+  proof of acceptance. Cross-owner reads use registered owners and retain this trust boundary.
 
 ## Fixed-roster barrier obligations (D1 laboratory)
 
@@ -133,6 +133,26 @@ operations. The protocol demo and frozen fixtures make none of those claims.
 - Replay lost replies and restart at each stage without undoing manual pause,
   duplicating cuts or reopening an incomplete manifest.
 - Preserve barrier facts in full/delta archives; refuse standalone shard recovery
-  release until a whole-cluster procedure exists. Public sharded HTTP stays off.
+  release; only the fully verified cluster procedure may release them. Public sharded HTTP stays off.
 
-See [BARRIER.md](BARRIER.md) for scope, failure evidence and D2 completion gates.
+See [BARRIER.md](BARRIER.md) for scope, failure evidence and the linked cluster recovery procedure.
+
+## Cross-owner recovery obligations
+
+- A write can commit only on the fixed physical owner. Remote facts come from
+  registered journals, never caller-supplied evidence or unaccepted R2 objects.
+- A complete epoch boundary contains every accepted dependency of every result.
+  All holds precede all cuts. Local commit rechecks prevent an in-flight action
+  crossing into the closed epoch.
+- Cluster restore pins every final archive digest before import. No member can
+  be released until every member completes and every retained dependency is
+  found within its planned journal/cut. Local predecessors remain earlier in
+  position; remote predecessors cannot have a later epoch.
+- Follower policy must match the authoritative retained stream exactly. A
+  snapshot preserves applied prefixes, not an invented simultaneous policy view.
+- Verification cursors and reconstructed barrier history are durable. Partial
+  import, lost replies, early environment changes and stale release requests
+  cannot revive credits, reuse an old barrier ID or bypass quarantine.
+
+The trusted plan and old-writer fence remain operator inputs. No claim of unknown
+suffix discovery, dynamic migration safety or public cluster readiness is made.

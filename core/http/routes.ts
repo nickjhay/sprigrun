@@ -50,7 +50,7 @@ function nextLink(url: URL, after: string, more: boolean) {
     next.searchParams.set('after', after);
     return next.pathname + next.search;
 }
-function pageResponse(env: Env, url: URL, title: string, page: ReturnType<NativeCoordinator['browse']>, html: boolean) {
+function pageResponse(env: Env, url: URL, title: string, page: Awaited<ReturnType<NativeCoordinator['browse']>>, html: boolean) {
     const next = nextLink(url, page.after, page.more);
     const r = html ? listing(env, title, page, next) : text(page.items.map(i => i.path + '\n').join('') + (next ? '# next: ' + next + '\n' : ''));
     if (next)
@@ -68,12 +68,12 @@ async function publicRead(request: Request, env: Env, core: NativeCoordinator, u
         const kind = p.get('kind') ?? 'sea';
         check(KINDS.includes(kind as typeof KINDS[number]), 'invalid_listing');
         const q: Browse = { kind, container: p.get('under'), after: p.get('after') ?? '' };
-        return pageResponse(env, url, q.container ?? kind, core.browse(q), p.get('view') === null || htmlView(p));
+        return pageResponse(env, url, q.container ?? kind, await core.browse(q), p.get('view') === null || htmlView(p));
     }
     if (/^\/(action|receipt|evidence)\//.test(path)) {
         const p = query(url, ['view']), html = htmlView(p), kind = path.split('/')[1];
         const result = path.slice(path.indexOf('/', 1));
-        const info = core.describeAction(result);
+        const info = await core.describeAction(result);
         if (kind === 'receipt')
             return html ? actionPage(env, info, info.rawReceipt, true) : text(info.rawReceipt);
         const evidence = await core.evidence(result);
@@ -95,17 +95,17 @@ async function publicRead(request: Request, env: Env, core: NativeCoordinator, u
     }
     if (p.has('select')) {
         check(p.get('select') === 'latest' && q?.container === path && !p.has('after'), 'invalid_selection');
-        return new Response(null, { status: 303, headers: { Location: core.latest(path) + (html ? '?view=html' : '') } });
+        return new Response(null, { status: 303, headers: { Location: (await core.latest(path)) + (html ? '?view=html' : '') } });
     }
     if (q)
-        return pageResponse(env, url, q.container ?? q.kind, core.browse(q), html);
+        return pageResponse(env, url, q.container ?? q.kind, await core.browse(q), html);
     check(!p.has('after'), 'invalid_query');
-    const item = core.describe(path), bytes = await core.read(path);
+    const item = await core.describe(path), bytes = await core.read(path);
     if (html)
         return recordPage(env, item, utf8(bytes));
     const etag = '"sha256-' + await contentAddress(bytes) + '"';
     // Visibility/integrity checks precede even a matching conditional or HEAD response.
-    core.describe(path);
+    await core.describe(path);
     const headers = { 'ETag': etag, 'Content-Length': String(bytes.length),
         'Cache-Control': 'private, max-age=300, immutable', 'Sprig-Submitted-At-Ms': item.atMs,
         'Link': '<' + path + '?view=html>; rel="alternate"; type="text/html"' };

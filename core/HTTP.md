@@ -240,10 +240,10 @@ tests; this is not a substitute for visual browser testing.
 
 ## Schema 5 transition (before deployment)
 
-The database is schema 5, the archive is `sprig-native-snapshot/5`, and the backup
+The database is schema 6, the archive is `sprig-native-snapshot/6`, and the backup
 witness is version 2. Old state is refused before mutation, never reset silently.
-Use a fresh directory explicitly (`--state .local/native-http-v5`) and preserve
-old files. [RECOVERY.md](RECOVERY.md#schema-5-transition-before-deployment) identifies
+Use a fresh directory explicitly (`--state .local/native-http-v6`) and preserve
+old files. [RECOVERY.md](RECOVERY.md#schema-6-transition-before-deployment) identifies
 the previous reader and explains the transition. Public signed formats stay v1.
 
 ## Separate content and author policies
@@ -265,6 +265,6 @@ not a promise of a remote moderation service already running. Both endpoints
 require the full operator token; the backup credential cannot use them.
 The `moderation` table is also available in the existing operator inspector.
 
-The public entrypoint refuses `CORE_TOPOLOGY` until sharded routing and cluster
-recovery are ready. The [barrier laboratory](BARRIER.md) uses privileged local RPC
+The public entrypoint refuses `CORE_TOPOLOGY` until metered sharded ingress, aggregate views
+and operator routing are ready. The [barrier laboratory](BARRIER.md) uses privileged local RPC
 and must not be deployed as a public adapter.

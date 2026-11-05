@@ -1,10 +1,10 @@
 # A durable barrier across local shards
 
-Slice D1: the barrier and fixed-budget foundation, tested against two real local
-SQLite-backed Durable Objects and R2. Public routing remains single-shard.
-Cross-owner references, the cluster backup bundle and coordinated cluster restore
-are D2, before exposing a sharded service. No production deployment or scheduler
-is installed. Test adapters are privileged and must never be deployed.
+The fixed-budget barrier runs against real local SQLite-backed Durable Objects
+and R2. [CLUSTER.md](CLUSTER.md) adds fixed ownership, trusted cross-owner
+references and coordinated full/incremental cluster recovery. Public routing
+remains single-shard. No deployment or backup scheduler is installed; privileged
+test adapters must never be deployed.
 
 ```sh
 npm run demo:barrier    # Stop all three objects after a lost cut reply; resume.
@@ -20,7 +20,7 @@ not whole-cluster disaster recovery or a production latency measurement.
 
 ## Fixed configuration and identity
 
-`CORE_TOPOLOGY` is a strict `sprig-topology/1` record containing a random cluster
+`CORE_TOPOLOGY` is a strict `sprig-topology/2` record containing a random cluster
 ID, u64 revision, canonical origin, 1–16 named members and the global admission
 policy. Names are ASCII identifiers, bounded to 32 characters. The member's
 `ctx.id.name` must be in the roster; unnamed/misnamed access fails. A normal
@@ -99,32 +99,32 @@ not estimate multi-shard hosting prices or promise a particular outage duration.
 
 ## Recovery and format boundary
 
-Database/archive schema 5 retains partition binding and barrier transitions.
+Database/archive schema 6 retains partition binding and barrier transitions.
 The ordinary full/delta verifier checks legal hold/release transitions, rejects
 mutations inside a held prefix, binds each cut to the held epoch, and preserves
 the closed position. Later releases or rounds cannot change an older archive.
 An imported shard must match its configured partition and stays quarantined.
 
 A standalone `restoreRelease` refuses partitioned state with
-`cluster_recovery_required`. There is no safe whole-cluster release yet: D2 must
-verify a manifest-bound archive set, cross-owner dependencies and final suffixes,
-then recover controller/participant state together. A valid barrier manifest is
-a cut boundary, not proof that all bodies have been copied to independent storage.
-Do not use this laboratory as a deployed cluster or hand-edit away quarantine.
+`cluster_recovery_required`. The coordinated procedure in [CLUSTER.md](CLUSTER.md)
+binds all archive chains, validates cross-owner dependencies and restores the
+controller and participants under one quarantine. A committed barrier manifest
+identifies a coherent boundary; it does not prove the bodies reached independent
+backup custody. Public sharded HTTP remains disabled.
 
 Old schema/archive versions are refused before mutation, never reset. Preserve
-old directories/files; PR #22's reader is commit
-`380a178a419c05635a42e79e5e23c9e04b4ea5a5`. For a fresh ordinary local core:
+old directories/files; PR #23's schema/archive-5 reader is commit
+`d301321b2fb3c70c63460f08506841eee3b23bd1`. For a fresh ordinary local core:
 
 ```sh
-npm run dev:core -- --state .local/native-http-v5 --operator
+npm run dev:core -- --state .local/native-http-v6 --operator
 ```
 
 Public signed formats remain v1 and backup witnesses remain v2. The production
 HTTP worker refuses `CORE_TOPOLOGY` rather than accidentally routing all requests
 to one member. There are no public barrier RPC routes. The local harness addresses
-participants explicitly; it does not claim to enforce logical ownership between
-them or resolve a remote key, publication or chat subject.
+participants explicitly, and participants enforce ownership. Remote keys, plot
+bindings and chat subjects are resolved through registered accepted facts.
 
 ## Evidence and the next part
 
@@ -134,8 +134,7 @@ configuration and journal identity, removal of actual controller/participant
 SQLite files, a stalled paid R2 upload, immutable closed exports, full + delta
 verification and refusal of standalone partition recovery release.
 
-D2 needs trusted cross-owner facts and policy catch-up, routing that binds an
-owner to exactly one registered participant, bounded raw-source intake before
-routing, and a whole-cluster backup/restore bundle. A cross-shard reference must
-never survive a global cut without the acceptance it depends on. Keep those
-checks in the same runnable slice before enabling sharded public HTTP.
+[CLUSTER.md](CLUSTER.md) records the implemented cross-owner and recovery checks.
+Remaining work before public sharded HTTP is bounded/metered source ingress,
+routing, aggregate views and authenticated cluster operations. Keep production
+single-shard unless capacity evidence calls for more.

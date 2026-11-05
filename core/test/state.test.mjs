@@ -16,7 +16,7 @@ function localSql(t) {
     },
   };
 }
-test('schema 1/2/3/4 and wrong-origin databases are rejected without altering tables or control', t => {
+test('schema 1/2/3/4/5 and wrong-origin databases are rejected without altering tables or control', t => {
   const sql = localSql(t);
   const old = { schema: 1, origin: 'https://sprig.run', epoch: '4', accepted: '19' };
   sql.exec('CREATE TABLE control(id INTEGER PRIMARY KEY, value TEXT); CREATE TABLE accepted(id TEXT PRIMARY KEY, receipt TEXT);');
@@ -37,12 +37,14 @@ test('schema 1/2/3/4 and wrong-origin databases are rejected without altering ta
   assert.throws(() => new State(sql, old.origin, DEFAULT_POLICY, 0), /incompatible_native_database/);
   assert.deepEqual(sql.exec('SELECT * FROM sqlite_master ORDER BY name').toArray(), schema);
   sql.exec('UPDATE control SET value=?', JSON.stringify({ ...old, schema: 5, partition: null }));
+  assert.throws(() => new State(sql, old.origin, DEFAULT_POLICY, 0), /incompatible_native_database/);
+  sql.exec('UPDATE control SET value=?', JSON.stringify({ ...old, schema: 6, partition: null }));
   assert.throws(() => new State(sql, 'https://elsewhere.invalid', DEFAULT_POLICY, 0), /incompatible_native_database/);
   assert.deepEqual(sql.exec('SELECT * FROM sqlite_master ORDER BY name').toArray(), schema);
 });
-test('old archive format is refused explicitly; new databases declare schema 5', t => {
+test('old archive format is refused explicitly; new databases declare schema 6', t => {
   const state = new State(localSql(t), 'https://sprig.run', DEFAULT_POLICY, 0);
-  assert.equal(state.control().schema, 5);
-  for (const schema of [1, 2, 3, 4]) assert.throws(() => validateHeader({ type: 'header', format: 'sprig-native-snapshot/' + schema, epoch: '0',
+  assert.equal(state.control().schema, 6);
+  for (const schema of [1, 2, 3, 4, 5]) assert.throws(() => validateHeader({ type: 'header', format: 'sprig-native-snapshot/' + schema, epoch: '0',
     capturedAtMs: '0', base: null, control: { ...state.control(), schema }, policy: DEFAULT_POLICY }), /archive_version/);
 });

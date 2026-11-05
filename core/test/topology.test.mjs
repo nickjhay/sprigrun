@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { topology, dividedPolicy } from '../host/topology.ts';
 import { DEFAULT_POLICY } from '../host/policy.ts';
-const make = n => ({ format:'sprig-topology/1', id:'a'.repeat(32), revision:'0', origin:'https://sprig.run',
+const make = n => ({ format:'sprig-topology/2', id:'a'.repeat(32), revision:'0', origin:'https://sprig.run',
   shards:Object.fromEntries(Array.from({length:n},(_,i)=>['shard_'+i,true])), budget:DEFAULT_POLICY });
 test('static shard capacities and refill rates sum exactly, including every integer remainder', () => {
   for (const n of [1,2,3,7,16]) {

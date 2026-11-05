@@ -169,3 +169,5 @@ Read **DESIGN.md** for the updated architecture, **RUNTIME.md** for the runtime 
 
 The two-participant snapshot barrier has a local restart drill: `npm run demo:barrier`.
 See [the barrier guide](core/BARRIER.md) for implemented invariants and the remaining sharding work.
+
+[Cross-owner recovery](core/CLUSTER.md) now has a local signed-garden loss drill: `npm run demo:cluster`. Public serving remains single-shard.

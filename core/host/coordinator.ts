@@ -1,4 +1,5 @@
-import { identifier, topology, dividedPolicy, barrierTransition, same, type Topology, type BarrierState } from './topology.ts';
+import { fact, readableLinks, type Fact } from './facts.ts';
+import { identifier, topology, dividedPolicy, shardFor, barrierTransition, same, type Topology, type BarrierState } from './topology.ts';
 import { manifest, type NativeBarrier } from './barrier.ts';
 import { DurableObject } from 'cloudflare:workers';
 import { refill, waitSeconds } from '../../shared/bucket.ts';
@@ -15,19 +16,20 @@ import { loadSource, putSource } from './objects.ts';
 import { canonical, digest, validateHeader } from './archive.ts';
 import { Recovery } from './recovery.ts';
 import { Inspection, type Browse } from './inspection.ts';
-import { Moderation, POLICY_BATCH, POLICY_REFRESH_MS } from './moderation.ts';
+import { Moderation, PolicyFollower, POLICY_BATCH, POLICY_REFRESH_MS } from './moderation.ts';
 import { AlreadyStored } from './errors.ts';
 import { handleHttp } from '../http/routes.ts';
 import { body, httpPolicy, ReadGate, HttpError, uploadHeaders, urlFor, query, type HttpPolicy } from '../http/transport.ts';
 
 export interface Env {
+  CORE_SHARDS?: DurableObjectNamespace<NativeCoordinator>;
   CORE_TOPOLOGY?: Topology; CORE_BARRIER?: DurableObjectNamespace<NativeBarrier>;
   SOURCES: R2Bucket; CORE_ORIGIN: string; CORE_POLICY?: Policy; CORE_RESTORE_MODE?: string;
   CORE_HTTP_POLICY?: HttpPolicy; ADMIN_TOKEN?: string; BACKUP_TOKEN?: string; CORE_LOCAL_OPERATOR?: string; ABUSE_EMAIL?: string;
 }
 type Verified = { action: Action; id: string; key: string | null; binding: string | null;
   keyRecord: string | null; authorBinding: string | null; source: string | null;
-  value: string | null; signature: string | null; header: string };
+  facts: Map<string, Fact>; value: string | null; signature: string | null; header: string };
 
 /** Trusted RPC only. No public router or admin credential handling in this slice.
  * R2 is private; presence of an object is never proof of accepted publication.
@@ -38,7 +40,8 @@ export class NativeCoordinator extends DurableObject<Env> {
   protected readonly moderation: Moderation;
   private readonly origin: string;
   private active = 0;
-  private registered = false;
+  private registry: { journals: Record<string, string> } | null = null;
+  private readonly follower: PolicyFollower | null;
   private readonly clustered: boolean;
   private readonly recovery: Recovery;
   private recovering = false;
@@ -55,23 +58,33 @@ export class NativeCoordinator extends DurableObject<Env> {
     this.clustered = t !== null;
     const shard = ctx.id.name;
     if (t) check(t.origin === this.origin && shard !== undefined && Object.hasOwn(t.shards, shard)
-      && env.CORE_BARRIER !== undefined && env.CORE_POLICY === undefined, 'invalid_partition_binding');
+      && env.CORE_SHARDS !== undefined && env.CORE_BARRIER !== undefined && env.CORE_POLICY === undefined, 'invalid_partition_binding');
     this.p = t ? dividedPolicy(t, shard!) : policy(env.CORE_POLICY);
     this.db = new State(ctx.storage.sql, this.origin, this.p, Date.now(), t ? { topology: t, shard: shard! } : null);
     this.moderation = new Moderation(this.db);
-    this.recovery = new Recovery(ctx, this.db, env.SOURCES, this.p);
-    this.inspection = new Inspection(this.db, p => this.readable(p), id => this.actionRecord(id), this.origin);
+    this.follower = t && shard !== Object.keys(t.shards).sort()[0] ? new PolicyFollower({
+      position: () => this.moderation.position(), apply: async changes => {
+        this.normal(); this.transaction(() => this.moderation.apply(changes)); await ctx.storage.sync();
+      } }, async after => {
+        await this.registration(); return env.CORE_SHARDS!.getByName(Object.keys(t.shards).sort()[0]!).policyPage(after);
+      }) : null;
+    this.recovery = new Recovery(ctx, this.db, env.SOURCES, this.p, t ? {
+      plan: hash => env.CORE_BARRIER!.getByName('barrier').restorePlan(hash),
+      fact: async (path, hash) => env.CORE_SHARDS!.getByName(await shardFor(t, path)).clusterFact(path, hash),
+      policy: (position, hash) => env.CORE_SHARDS!.getByName(Object.keys(t.shards).sort()[0]!).clusterPolicy(position, hash),
+    } : null);
+    this.inspection = new Inspection(this.db, async p => { const facts = await this.dependencies([p]); return this.readable(p, facts); }, async id => this.actionRecord(id, await this.evidenceFacts(id)), this.origin);
     this.http = httpPolicy(env.CORE_HTTP_POLICY); this.reads = new ReadGate(this.http);
   }
   private normal() { check(this.env.CORE_RESTORE_MODE !== '1' && !this.recovery.locked(), 'recovery_mode'); }
   private transaction<T>(f: () => T): T { return this.ctx.storage.transactionSync(f); }
   private async registration() {
-    if (!this.clustered || this.registered) return;
+    if (!this.clustered || this.registry) return;
     const c = this.db.control(); check(c.partition !== null, 'partition_required');
     const registry = await this.env.CORE_BARRIER!.getByName('barrier').configuration();
     check(registry && same(registry.topology, c.partition.topology)
       && registry.journals[c.partition.shard] === c.journal, 'shard_not_registered');
-    this.registered = true; // Immutable registry; one trusted lookup per instance lifetime.
+    this.registry = registry; // Immutable registry; one trusted lookup per instance lifetime.
   }
   private mutable(c = this.db.control()) { check(c.barrier?.phase !== 'held', 'barrier_held'); }
   private refresh(c: Control) {
@@ -88,46 +101,80 @@ export class NativeCoordinator extends DurableObject<Env> {
   }
   private visible(path: string) { check(!this.moderation.active('hide', path), 'suppressed'); }
 
-  /** Accepted immutable facts are trusted even when their public view is hidden. */
-  private retained(path: string): Result | null {
+  private async owns(path: string) {
+    const p = this.db.control().partition;
+    if (p) check(await shardFor(p.topology, path) === p.shard, 'wrong_shard');
+  }
+  private async policyTick() {
+    if (this.db.control().barrier?.phase === 'held') return;
+    try { await this.follower?.tick(Date.now()); } catch { /* Retain the last applied policy on outage/hold. */ }
+  }
+  /** Privileged, read-only facts from the registered owner. R2 presence is insufficient. */
+  async referenceFact(path: string, journal: string): Promise<Fact> {
+    this.normal(); await this.registration(); await this.owns(path);
+    check(this.db.control().journal === journal, 'shard_not_registered');
+    const row = this.db.result(path); check(row, 'entry_unavailable');
+    await this.ctx.storage.sync(); return fact(row);
+  }
+  private async dependencies(paths: string[], facts = new Map<string, Fact>()): Promise<Map<string, Fact>> {
+    if (!this.clustered) return facts;
+    await this.registration(); await this.policyTick();
+    const p = this.db.control().partition!;
+    const visit = async (path: string) => {
+      if (facts.has(path)) return;
+      check(facts.size < 12, 'dependency_limit');
+      const name = await shardFor(p.topology, path);
+      const row = name === p.shard ? this.db.result(path) :
+        await this.env.CORE_SHARDS!.getByName(name).referenceFact(path, this.registry!.journals[name]!);
+      check(row, parseReference(path).kind === 'sea' ? 'source_unavailable' : 'entry_unavailable');
+      check(row.path === path, 'reference_mismatch'); facts.set(path, fact(row as Result));
+      for (const link of readableLinks(row)) await visit(link);
+    };
+    for (const path of paths) await visit(path);
+    return facts;
+  }
+  /** Local facts are always re-read; remote facts are immutable and request-scoped. */
+  private retained(path: string, facts = new Map<string, Fact>()): Fact | null {
     const ref = parseReference(path);
     check(ref.kind !== 'step' && ref.kind !== 'chat', 'unsupported_read');
-    const row = this.db.result(path);
+    const row = this.db.result(path) ?? facts.get(path);
     check(row, ref.kind === 'sea' ? 'source_unavailable' : 'entry_unavailable');
+    check(row.epoch <= orderedU64(this.db.control().epoch), 'reference_future_epoch');
     return ref.kind === 'sea' ? null : row;
   }
   private authorAllowed(v: Verified) {
     if (v.key !== null) check(!this.moderation.active('block', v.key), 'author_blocked');
   }
   /** Bounded dependency checks: publication -> source and optional plot. */
-  private readable(path: string): Result | null {
+  private readable(path: string, facts = new Map<string, Fact>()): Fact | null {
     this.visible(path);
     const ref = parseReference(path);
     if (ref.kind === 'sea') {
-      check(this.db.result(path)?.kind === 'sea', 'source_unavailable');
+      this.retained(path, facts);
       return null;
     }
     check(ref.kind !== 'step' && ref.kind !== 'chat', 'unsupported_read');
-    const entry = this.db.result(path);
+    const entry = this.db.result(path) ?? facts.get(path);
     check(entry, 'entry_unavailable');
-    if (ref.kind === 'publication') this.readable(formatReference(ref.plot));
-    if (ref.kind === 'message') this.readable(formatReference(ref.subject));
-    if (entry.value !== null) this.readable(entry.value);
+    check(entry.epoch <= orderedU64(this.db.control().epoch), 'reference_future_epoch');
+    if (ref.kind === 'publication') this.readable(formatReference(ref.plot), facts);
+    if (ref.kind === 'message') this.readable(formatReference(ref.subject), facts);
+    if (entry.value !== null) this.readable(entry.value, facts);
     return entry;
   }
   private conditions(v: Verified) {
     this.normal();
     const a = v.action, t = a.target;
-    if (a.author !== null) this.retained(a.author);
-    if (v.key !== null) this.retained(v.key);
-    if (v.value !== null) this.readable(v.value);
+    if (a.author !== null) this.retained(a.author, v.facts);
+    if (v.key !== null) this.retained(v.key, v.facts);
+    if (v.value !== null) this.readable(v.value, v.facts);
     if (t.kind === 'sea') { this.visible('/sea/' + v.source); return; }
     if (t.kind === 'plot') check(v.key !== null, 'author_required');
     if (t.kind === 'publication') {
-      const owner = this.readable(formatReference(t.plot));
+      const owner = this.readable(formatReference(t.plot), v.facts);
       check(v.key !== null && owner?.controller === v.key, 'wrong_controller');
     }
-    if (t.kind === 'chat') this.readable(formatReference(t.subject));
+    if (t.kind === 'chat') this.readable(formatReference(t.subject), v.facts);
     if (t.anchor !== null)
       check(this.db.result(at(collection(t), t.kind, t.anchor)), 'anchor_unavailable');
   }
@@ -137,6 +184,12 @@ export class NativeCoordinator extends DurableObject<Env> {
   private async verify(bytes: Uint8Array, signature: string | null): Promise<Verified> {
     const action = parseAction(bytes, this.origin);
     const target = action.target, value = bodyValue(action);
+    const source = target.kind === 'sea' ? await contentAddress(action.body) : null;
+    await this.owns(source === null ? action.path : '/sea/' + source);
+    const paths = [action.author, value,
+      target.kind === 'publication' ? formatReference(target.plot) : null,
+      target.kind === 'chat' ? formatReference(target.subject) : null].filter((x): x is string => x !== null);
+    const facts = await this.dependencies(paths);
     let keyRecord: string | null = null, authorBinding: string | null = null;
     let key: string | null = null, binding: string | null = null;
     let id: string;
@@ -145,13 +198,14 @@ export class NativeCoordinator extends DurableObject<Env> {
       id = await contentAddress(bytes);
     } else {
       check(typeof signature === 'string', 'signature_required');
-      const author = this.retained(action.author);
+      const author = this.retained(action.author, facts);
       key = author === null ? action.author : author.controller;
       check(key !== null, 'invalid_author');
       const keyRef = parseReference(key);
       check(keyRef.kind === 'sea', 'invalid_key_reference');
       check(parseAddress(keyRef.address).length <= LIMITS.recordBytes, 'key_record_limit');
-      this.retained(key);
+      await this.dependencies([key], facts);
+      this.retained(key, facts);
       const keyBytes = await this.loadSource(keyRef.address);
       keyRecord = utf8(keyBytes);
       authorBinding = author?.binding ?? null;
@@ -161,8 +215,7 @@ export class NativeCoordinator extends DurableObject<Env> {
       }, this.origin);
       id = result.id; binding = result.binding;
     }
-    const v: Verified = { action, id, key, binding, keyRecord, authorBinding, value, signature,
-      source: target.kind === 'sea' ? await contentAddress(action.body) : null,
+    const v: Verified = { action, id, key, binding, keyRecord, authorBinding, value, signature, facts, source,
       header: utf8(bytes.subarray(0, bytes.length - action.body.length)) };
     this.conditions(v);
     return v;
@@ -227,9 +280,10 @@ export class NativeCoordinator extends DurableObject<Env> {
       });
       await this.ctx.storage.sync(); // No hashing, verification or R2 before admission is durable.
       const { bytes, signature } = await receive();
+      await this.policyTick();
       const v = await this.verify(bytes, signature);
       const existing = this.db.accepted(v.id);
-      if (existing) { this.actionRecord(existing.path); return existing.receipt; }
+      if (existing) { this.actionRecord(existing.path, v.facts); return existing.receipt; }
       this.authorAllowed(v);
       if (v.source !== null) this.freshSource(v.source);
       // Changed admission limits do not invalidate already accepted retries.
@@ -237,11 +291,12 @@ export class NativeCoordinator extends DurableObject<Env> {
       if (v.action.target.kind === 'sea') check(v.action.body.length <= this.p.sourceBytes, 'source_size_limit');
       if (v.source !== null) await this.prepareSource(v);
       await this.prepared();
+      await this.policyTick();
       const receipt = this.transaction(() => {
         const c = this.db.control(); this.mutable(c); check(!c.paused, 'writes_paused');
         this.conditions(v); // Recheck every mutable condition after all awaits.
         const prior = this.db.accepted(v.id);
-        if (prior) { this.actionRecord(prior.path); return prior.receipt; }
+        if (prior) { this.actionRecord(prior.path, v.facts); return prior.receipt; }
         this.authorAllowed(v);
         const t = v.action.target, now = String(Date.now()), epoch = orderedU64(c.epoch);
         if (v.source !== null) this.freshSource(v.source);
@@ -310,18 +365,24 @@ export class NativeCoordinator extends DurableObject<Env> {
       try { return await run(); } finally { this.operatorActive--; }
     });
   }
-  private actionRecord(path: string) {
+  private actionRecord(path: string, facts = new Map<string, Fact>()) {
     parseReference(path);
     const row = this.db.result(path); check(row, 'action_unavailable');
-    this.readable(row.path);
+    this.readable(row.path, facts);
     const author = parseAction(textBytes(row.header), this.origin).author;
-    if (author !== null) this.readable(author);
+    if (author !== null) this.readable(author, facts);
     const key = parseReceipt(textBytes(row.receipt), this.origin).key;
-    if (key !== null) this.readable(key);
+    if (key !== null) this.readable(key, facts);
     return row;
   }
-  describe(path: string) { this.normal(); return this.inspection.describe(path); }
-  describeAction(path: string) { this.normal(); return this.inspection.describeAction(path); }
+  private async evidenceFacts(path: string) {
+    const row = this.db.result(path); check(row, 'action_unavailable');
+    const author = parseAction(textBytes(row.header), this.origin).author;
+    const key = parseReceipt(textBytes(row.receipt), this.origin).key;
+    return this.dependencies([path, author, key].filter((p): p is string => p !== null));
+  }
+  async describe(path: string) { this.normal(); await this.owns(path); return this.inspection.describe(path); }
+  async describeAction(path: string) { this.normal(); await this.owns(path); return this.inspection.describeAction(path); }
   browse(q: Browse) { this.normal(); return this.inspection.browse(q); }
   operatorInspect(table: string, after: string) { return this.inspection.operator(table, after); }
   operatorRecord(path: string) { parseReference(path); const row=this.db.result(path); check(row,'action_unavailable'); return row; }
@@ -338,37 +399,41 @@ export class NativeCoordinator extends DurableObject<Env> {
   /** Trusted adapter reads. Public HTTP must still apply inert MIME/cache policy. */
   async read(path: string): Promise<Uint8Array<ArrayBuffer>> {
     this.normal();
-    const entry = this.readable(path), ref = parseReference(path);
+    await this.owns(path);
+    const facts = await this.dependencies([path]);
+    const entry = this.readable(path, facts), ref = parseReference(path);
     if (ref.kind === 'sea') {
-      const bytes = await this.loadSource(ref.address); this.readable(path); return bytes;
+      const bytes = await this.loadSource(ref.address); this.readable(path, facts); return bytes;
     }
     check(entry, 'entry_unavailable');
-    if (entry.binding !== null) return textBytes(entry.binding);
-    return textBytes(entry.body!);
+    const row = this.db.result(path)!;
+    if (row.binding !== null) return textBytes(row.binding);
+    return textBytes(row.body!);
   }
-  latest(path: string): string {
-    this.normal();
+  async latest(path: string): Promise<string> {
+    this.normal(); await this.owns(path);
     const target = parsePostTarget(path);
     check(target.kind !== 'sea' && target.anchor === null, 'collection_required');
     const head = this.db.sql.exec<{ number: string }>('SELECT number FROM heads WHERE collection=?', collection(target)).toArray()[0];
     check(head, 'entry_unavailable');
     const result = at(collection(target), target.kind, String(BigInt(head.number)));
-    this.readable(result); return result; // Never fall back behind a suppressed head.
+    this.readable(result, await this.dependencies([result])); return result; // Never fall back behind a suppressed head.
   }
   async evidence(path: string) {
     this.normal();
-    parseReference(path);
+    await this.owns(path);
+    const facts = await this.evidenceFacts(path);
     const row = this.db.result(path); check(row, 'action_unavailable');
-    this.readable(row.path);
+    this.readable(row.path, facts);
     // Retained verification evidence must not provide an alternate route to a suppressed source.
     const action = parseAction(textBytes(row.header), this.origin);
-    if (action.author !== null) this.readable(action.author);
+    if (action.author !== null) this.readable(action.author, facts);
     const keyPath = row.key_record === null ? null : '/sea/' + await contentAddress(textBytes(row.key_record));
-    if (keyPath !== null) this.readable(keyPath);
+    if (keyPath !== null) this.readable(keyPath, facts);
     const body = row.source === null ? textBytes(row.body!) : await this.loadSource(row.source);
-    this.readable(row.path);
-    if (action.author !== null) this.readable(action.author);
-    if (keyPath !== null) this.readable(keyPath);
+    this.readable(row.path, facts);
+    if (action.author !== null) this.readable(action.author, facts);
+    if (keyPath !== null) this.readable(keyPath, facts);
     return { action: row.header + utf8(body), signature: row.signature,
       keyRecord: row.key_record, plotBinding: row.author_binding, receipt: row.receipt };
   }
@@ -378,7 +443,10 @@ export class NativeCoordinator extends DurableObject<Env> {
   async suppress(path: string, suppressed: boolean): Promise<void> {
     this.normal();
     const ref = parseReference(path); check(typeof suppressed === 'boolean', 'invalid_suppression');
-    check(ref.kind === 'sea' || this.db.result(path), 'entry_unavailable');
+    if (ref.kind !== 'sea') {
+      const facts = await this.dependencies([path]);
+      check(this.db.result(path) ?? facts.get(path), 'entry_unavailable');
+    }
     await this.changePolicy('hide', path, suppressed);
   }
   async blockAuthor(key: string, blocked: boolean): Promise<void> {
@@ -389,6 +457,8 @@ export class NativeCoordinator extends DurableObject<Env> {
     await this.changePolicy('block', key, blocked);
   }
   private async changePolicy(effect: 'hide' | 'block', path: string, active: boolean) {
+    const p = this.db.control().partition;
+    check(!p || p.shard === Object.keys(p.topology.shards).sort()[0], 'policy_authority_required');
     this.transaction(() => {
       this.mutable();
       if (this.moderation.decision(effect, path)?.active === Number(active)) return;
@@ -400,7 +470,7 @@ export class NativeCoordinator extends DurableObject<Env> {
   }
   policyPage(after: string) { this.normal(); return this.moderation.page(after); }
   policyStatus() { this.normal(); return { applied: this.moderation.position(),
-    mode: 'local-authority', refreshTargetMs: POLICY_REFRESH_MS, batchLimit: POLICY_BATCH }; }
+    mode: this.follower ? 'follower' : 'local-authority', refreshTargetMs: POLICY_REFRESH_MS, batchLimit: POLICY_BATCH }; }
   async pause(paused: boolean): Promise<void> {
     this.normal();
     check(typeof paused === 'boolean', 'invalid_pause');
@@ -497,8 +567,19 @@ export class NativeCoordinator extends DurableObject<Env> {
     try { return await operation(); } finally { this.recovering = false; }
   }
   restoreStatus() { return this.recovery.status(); }
-  restoreBegin(header: string, footer: string, target?: string) { return this.restoring(() => this.recovery.begin(header, footer, target)); }
+  restoreBegin(header: string, footer: string, target?: string, cluster: string | null = null) { return this.restoring(() => this.recovery.begin(header, footer, target, cluster)); }
   restoreRecord(index: string, line: string) { return this.restoring(() => this.recovery.importRecord(index, line)); }
   restoreFinish() { return this.restoring(() => this.recovery.finish()); }
   restoreRelease(chain: string, confirmation: string) { return this.restoring(() => this.recovery.release(chain, confirmation)); }
+  clusterPristine() { check(this.env.CORE_RESTORE_MODE === '1', 'restore_mode_required'); this.recovery.pristine(); }
+  clusterCut(epoch: string, hash: string) { return this.recovery.clusterCut(epoch, hash); }
+  clusterReady(hash: string) { return this.restoring(() => this.recovery.clusterReady(hash)); }
+  clusterFact(path: string, hash: string) { return this.recovery.clusterFact(path, hash); }
+  clusterPolicy(position: string, hash: string) { return this.recovery.clusterPolicy(position, hash); }
+  clusterVerify(hash: string) { return this.restoring(() => this.recovery.clusterVerify(hash)); }
+  clusterRelease(hash: string) { return this.restoring(async () => {
+    const plan = await this.env.CORE_BARRIER!.getByName('barrier').restorePublished(hash);
+    return this.recovery.clusterRelease(hash, plan);
+  }); }
+
 }

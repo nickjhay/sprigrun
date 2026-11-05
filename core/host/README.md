@@ -23,7 +23,7 @@ work. HTTP uses the same acceptance path, sharing its active slots and durable
 attempt debit before reading a bounded body with a total deadline. The adapter
 also requires exact agreement between actual and signed HTTP destinations.
 
-The host resolves author keys and plot bindings from its own accepted state.
+The host resolves author keys and plot bindings from registered accepted state.
 Clients cannot provide substitute bindings. It rechecks ownership, referenced
 source availability, suppression, pause state and anchor existence at commit.
 Old and suppressed anchors count as existing entries; unknown future/gap anchors
@@ -171,16 +171,16 @@ advanced in the same transaction; repeated unchanged decisions add nothing.
 An index on effect/path/position supplies current decisions without a duplicate
 mutable projection table. A snapshot captures the applied position as well as the epoch. Late catch-up
 with an older policy issue epoch cannot enter that already closed prefix.
-Ordinary GETs do not write policy state. This is an
-operator-controlled history, not a public append endpoint.
+Ordinary single-shard GETs do not write policy state. Cluster reads can trigger
+a bounded policy catch-up; the history remains operator-controlled.
 
-The local authority applies changes immediately. `PolicyFollower` is a tested
-host-independent catch-up component for the later shard adapter: one batch of
-at most 32 per tick, a 60-second refresh/backoff target, coalesced concurrent
-refreshes, and a durable cursor supplied by the journal. The transport must be
-trusted and deadline-bounded. There is no running remote poller or second shard
-yet. Stale policy can admit an action; a later content hide cleans it up without
-rewriting the accepted receipt. This is not instantaneous key revocation.
+The local authority applies changes immediately. In the local cluster,
+`PolicyFollower` pulls from the fixed first member: at most 32 changes per tick,
+a 60-second refresh/backoff target, coalesced concurrent refreshes, and a durable
+cursor supplied by the journal. Reads/writes drive catch-up; there is no alarm
+or hard convergence deadline. Stale policy can admit an action; a later content
+hide cleans it up without rewriting its receipt. This is not instantaneous key
+revocation. Public HTTP still uses one local authority.
 
 A follower applies changes and its cursor in one transaction, then syncs before
 acknowledging. Gaps, conflicting duplicates, future/backwards epochs and invalid
@@ -190,9 +190,8 @@ feed and status are available at `/admin/policy?after=0`.
 
 ## Fixed-roster barrier laboratory
 
-[D1](../BARRIER.md) adds immutable partition bindings, exact divided budgets and a
-durable hold separate from manual pause. The global controller publishes all
-acknowledged cuts before any participant releases. Lost replies and restarts are
-covered against real SQLite/R2. It adds no R2 operation to ordinary publication.
-Public routing remains single-shard; whole-cluster restore and cross-owner
-references must precede enabling sharded HTTP.
+[BARRIER.md](../BARRIER.md) adds immutable partition bindings, exact divided budgets
+and a durable hold/cut/publish/release protocol. [CLUSTER.md](../CLUSTER.md) adds
+fixed physical placement, registered cross-owner facts, policy followers and
+coordinated full/incremental restore. Public HTTP remains single-shard pending
+metered ingress, routing and aggregate/operator views.
