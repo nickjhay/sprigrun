@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { localNative } from '../scripts/local-native.mjs';
-import { backup, incrementalBackup, restore, restoreChain, verify, verifyChain } from '../scripts/recover.mjs';
+import { backup, incrementalBackup, restore, restoreChain, prepareRestoreChain, verify, verifyChain } from '../scripts/recover.mjs';
 import { plant, action, origin, drillPolicy } from '../scripts/recovery-garden.mjs';
 import { parseReceipt } from '../src/receipt.ts';
 import { signAction } from '../src/authority.ts';
@@ -149,4 +149,24 @@ test('a validly framed delta cannot introduce a dependent before its accepted pr
   await restore(h.core, files[0], parts[0].footer.chain, changed.chain);
   await assert.rejects(restore(h.core, changed.path, changed.chain), /archive_missing_source/);
   assert.equal((await h.core.restoreStatus()).phase, 'importing');
+});
+
+test('prepared restore cannot trust changed bytes, framing or caller-mutated descriptors', async t => {
+  const original = await readFile(files[0], 'utf8'), chain = parts[0].footer.chain;
+  for (const kind of ['body', 'footer', 'trailing']) {
+    const file = join(dir, 'after-preflight-' + kind + '.jsonl'); await writeFile(file, original);
+    const prepared = await prepareRestoreChain([file], chain), h = await target(t);
+    const values = original.trimEnd().split('\n').map(JSON.parse);
+    if (kind === 'body') values.find(r => r.type === 'results' && r.row.kind === 'sea').body += 'changed';
+    if (kind === 'footer') values.pop();
+    if (kind === 'trailing') values.push({ unexpected: true });
+    await writeFile(file, values.map(canonical).join('\n') + '\n');
+    await assert.rejects(prepared.restore(h.core), kind === 'body' ? /archive_source_hash/ : kind === 'footer' ? /archive_changed/ : /archive_trailing_data/);
+    assert.equal((await h.core.restoreStatus()).phase, 'importing');
+    await assert.rejects(h.core.read(garden.key), /recovery_mode/);
+  }
+  const input = [files[0]], prepared = await prepareRestoreChain(input, chain), h = await target(t);
+  input[0] = 'not-the-checked-file'; prepared.final.footer.chain = '0'.repeat(64);
+  assert.equal((await prepared.restore(h.core)).phase, 'restored');
+  assert.equal((await h.core.restoreStatus()).expected, chain);
 });

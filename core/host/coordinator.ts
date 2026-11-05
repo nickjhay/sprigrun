@@ -1,4 +1,4 @@
-import { fact, readableLinks, type Fact } from './facts.ts';
+import { fact, readableLinks, requiredReferences, type Fact } from './facts.ts';
 import { identifier, topology, dividedPolicy, shardFor, barrierTransition, same, type Topology, type BarrierState } from './topology.ts';
 import { manifest, type NativeBarrier } from './barrier.ts';
 import { DurableObject } from 'cloudflare:workers';
@@ -26,6 +26,7 @@ export interface Env {
   CORE_TOPOLOGY?: Topology; CORE_BARRIER?: DurableObjectNamespace<NativeBarrier>;
   SOURCES: R2Bucket; CORE_ORIGIN: string; CORE_POLICY?: Policy; CORE_RESTORE_MODE?: string;
   CORE_HTTP_POLICY?: HttpPolicy; ADMIN_TOKEN?: string; BACKUP_TOKEN?: string; CORE_LOCAL_OPERATOR?: string; ABUSE_EMAIL?: string;
+  CORE_CAPACITY_BYTES?: number;
 }
 type Verified = { action: Action; id: string; key: string | null; binding: string | null;
   keyRecord: string | null; authorBinding: string | null; source: string | null;
@@ -50,10 +51,13 @@ export class NativeCoordinator extends DurableObject<Env> {
   private readonly http: HttpPolicy;
   private readonly reads: ReadGate;
   private operatorActive = 0;
+  private readonly capacity: number;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.origin = canonicalOrigin(env.CORE_ORIGIN);
+    this.capacity = env.CORE_CAPACITY_BYTES ?? 800_000_000;
+    check(Number.isSafeInteger(this.capacity) && this.capacity > 0, 'invalid_capacity');
     const t = env.CORE_TOPOLOGY === undefined ? null : topology(env.CORE_TOPOLOGY);
     this.clustered = t !== null;
     const shard = ctx.id.name;
@@ -78,6 +82,15 @@ export class NativeCoordinator extends DurableObject<Env> {
   }
   private normal() { check(this.env.CORE_RESTORE_MODE !== '1' && !this.recovery.locked(), 'recovery_mode'); }
   private transaction<T>(f: () => T): T { return this.ctx.storage.transactionSync(f); }
+  /** Public growth stops below the provider limit; operator/recovery writes retain headroom. */
+  private publicTransaction<T>(f: () => T): T {
+    return this.transaction(() => {
+      check(this.db.sql.databaseSize < this.capacity, 'capacity_limit');
+      const result = f();
+      check(this.db.sql.databaseSize < this.capacity, 'capacity_limit');
+      return result;
+    });
+  }
   private async registration() {
     if (!this.clustered || this.registry) return;
     const c = this.db.control(); check(c.partition !== null, 'partition_required');
@@ -127,7 +140,7 @@ export class NativeCoordinator extends DurableObject<Env> {
       const row = name === p.shard ? this.db.result(path) :
         await this.env.CORE_SHARDS!.getByName(name).referenceFact(path, this.registry!.journals[name]!);
       check(row, parseReference(path).kind === 'sea' ? 'source_unavailable' : 'entry_unavailable');
-      check(row.path === path, 'reference_mismatch'); facts.set(path, fact(row as Result));
+      check(row.path === path, 'reference_mismatch'); facts.set(path, fact(row));
       for (const link of readableLinks(row)) await visit(link);
     };
     for (const path of paths) await visit(path);
@@ -157,26 +170,22 @@ export class NativeCoordinator extends DurableObject<Env> {
     const entry = this.db.result(path) ?? facts.get(path);
     check(entry, 'entry_unavailable');
     check(entry.epoch <= orderedU64(this.db.control().epoch), 'reference_future_epoch');
-    if (ref.kind === 'publication') this.readable(formatReference(ref.plot), facts);
-    if (ref.kind === 'message') this.readable(formatReference(ref.subject), facts);
-    if (entry.value !== null) this.readable(entry.value, facts);
+    for (const link of readableLinks(entry)) this.readable(link, facts);
     return entry;
   }
   private conditions(v: Verified) {
     this.normal();
     const a = v.action, t = a.target;
-    if (a.author !== null) this.retained(a.author, v.facts);
-    if (v.key !== null) this.retained(v.key, v.facts);
-    if (v.value !== null) this.readable(v.value, v.facts);
+    const refs = requiredReferences(a, v.key, v.value);
+    for (const path of refs.retained) this.retained(path, v.facts);
+    for (const path of refs.readable) this.readable(path, v.facts);
     if (t.kind === 'sea') { this.visible('/sea/' + v.source); return; }
     if (t.kind === 'plot') check(v.key !== null, 'author_required');
-    if (t.kind === 'publication') {
-      const owner = this.readable(formatReference(t.plot), v.facts);
+    if (refs.plot) {
+      const owner = this.retained(refs.plot, v.facts);
       check(v.key !== null && owner?.controller === v.key, 'wrong_controller');
     }
-    if (t.kind === 'chat') this.readable(formatReference(t.subject), v.facts);
-    if (t.anchor !== null)
-      check(this.db.result(at(collection(t), t.kind, t.anchor)), 'anchor_unavailable');
+    if (refs.anchor) check(this.db.result(refs.anchor), 'anchor_unavailable');
   }
   private async loadSource(address: string): Promise<Uint8Array<ArrayBuffer>> {
     return loadSource(this.env.SOURCES, address);
@@ -186,10 +195,8 @@ export class NativeCoordinator extends DurableObject<Env> {
     const target = action.target, value = bodyValue(action);
     const source = target.kind === 'sea' ? await contentAddress(action.body) : null;
     await this.owns(source === null ? action.path : '/sea/' + source);
-    const paths = [action.author, value,
-      target.kind === 'publication' ? formatReference(target.plot) : null,
-      target.kind === 'chat' ? formatReference(target.subject) : null].filter((x): x is string => x !== null);
-    const facts = await this.dependencies(paths);
+    const refs = requiredReferences(action, null, value);
+    const facts = await this.dependencies([...refs.retained, ...refs.readable]);
     let keyRecord: string | null = null, authorBinding: string | null = null;
     let key: string | null = null, binding: string | null = null;
     let id: string;
@@ -236,7 +243,7 @@ export class NativeCoordinator extends DurableObject<Env> {
    */
   private async prepareSource(v: Verified) {
     const address = v.source!;
-    this.transaction(() => {
+    this.publicTransaction(() => {
       const c = this.db.control(); this.mutable(c); check(!c.paused, 'writes_paused');
       this.conditions(v); this.authorAllowed(v);
       if (this.db.source(address)) return;
@@ -274,7 +281,7 @@ export class NativeCoordinator extends DurableObject<Env> {
     this.active++;
     try {
       await this.registration();
-      this.transaction(() => {
+      this.publicTransaction(() => {
         const c = this.db.control(); this.mutable(c); check(!c.paused, 'writes_paused'); this.refresh(c);
         check(c.attempts.tokens >= 1, 'attempt_limit'); c.attempts.tokens--; this.db.save(c);
       });
@@ -292,7 +299,7 @@ export class NativeCoordinator extends DurableObject<Env> {
       if (v.source !== null) await this.prepareSource(v);
       await this.prepared();
       await this.policyTick();
-      const receipt = this.transaction(() => {
+      const receipt = this.publicTransaction(() => {
         const c = this.db.control(); this.mutable(c); check(!c.paused, 'writes_paused');
         this.conditions(v); // Recheck every mutable condition after all awaits.
         const prior = this.db.accepted(v.id);
@@ -390,6 +397,7 @@ export class NativeCoordinator extends DurableObject<Env> {
     this.normal(); const c = this.db.control(); this.refresh(c); // Projection only: no durable view counter.
     return { origin: c.origin, epoch: c.epoch, writes_paused: c.paused, accepted_actions: c.accepted,
       journal_bytes: this.db.sql.databaseSize,
+      journal_capacity_bytes: this.capacity, capacity_reached: this.db.sql.databaseSize >= this.capacity,
       reserved_source_bytes: c.reservedBytes, accepted_debit_bytes: c.acceptedDebit,
       growth_credit: c.growth.tokens, burst_credit: c.burst.tokens, attempt_credit: c.attempts.tokens,
       source_limit: this.p.sourceBytes, chat_limit: this.p.chatBytes, active_uploads: this.active,
@@ -470,7 +478,8 @@ export class NativeCoordinator extends DurableObject<Env> {
   }
   policyPage(after: string) { this.normal(); return this.moderation.page(after); }
   policyStatus() { this.normal(); return { applied: this.moderation.position(),
-    mode: this.follower ? 'follower' : 'local-authority', refreshTargetMs: POLICY_REFRESH_MS, batchLimit: POLICY_BATCH }; }
+    mode: this.follower ? 'follower' : 'local-authority', refreshTargetMs: POLICY_REFRESH_MS, batchLimit: POLICY_BATCH,
+    refresh: this.follower?.status() ?? null }; }
   async pause(paused: boolean): Promise<void> {
     this.normal();
     check(typeof paused === 'boolean', 'invalid_pause');

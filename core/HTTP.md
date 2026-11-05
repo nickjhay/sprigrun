@@ -152,6 +152,16 @@ rejections can still cost money. Independent backup traffic has a separate
 operator concurrency limit of two. Calibrate cost/load and provider limits before
 launch; none of these bounds alone promises a $10/month ceiling.
 
+`CORE_CAPACITY_BYTES` is a positive integer operational setting, defaulting to
+800,000,000 SQLite bytes per coordinator. Public write transactions check physical
+size before and after mutation; crossing the cutoff rolls back that transaction.
+At the cutoff, POST returns `503 capacity_limit` before body consumption or paid
+R2 work, including retry POSTs. Existing receipt GETs remain usable. The response
+points to `/stats` and does not advertise a timed retry: operator action is needed.
+`journal_capacity_bytes` and `capacity_reached` accompany `journal_bytes` there.
+Moderation, cuts and recovery bypass this public growth guard. It reserves room
+for operations; it is not an R2 quota, provider hard limit or automatic alarm.
+
 The runtime and clients may normalize a URL before our code sees it. We require
 canonical exposed URLs and bind the signed URL exactly; we cannot attest to the
 original wire spelling. For example, a signed noncanonical path cannot be made

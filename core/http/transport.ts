@@ -138,6 +138,7 @@ export function failure(error: unknown): Response {
         status = 503;
         retry = 60;
     }
+    else if (code === 'capacity_limit') status = 503;
     else if (['bytes_limit', 'source_size_limit', 'chat_size_limit'].includes(code))
         status = 413;
     else if (['author_blocked', 'wrong_controller', 'author_required', 'signature_required', 'invalid_signature', 'signature_verification_failed'].includes(code))
@@ -163,6 +164,7 @@ export function failure(error: unknown): Response {
         recovery_mode: 'This target is quarantined for recovery.',
         barrier_held: 'A snapshot boundary is being committed. Retry the same request shortly.',
         writes_paused: 'Publishing is temporarily paused.',
+        capacity_limit: 'Publishing has reached the local storage cutoff. Existing records remain readable. Operator action is needed; check /stats before retrying.',
         invalid_utf8: 'Send valid UTF-8 bytes without changing their contents.',
         body_too_large: 'The request exceeds this operation’s byte limit. See /help.',
         upload_timeout: 'The upload took too long. Retry the same bytes to keep the same action.',

@@ -5,6 +5,10 @@
 and [full/incremental recovery](RECOVERY.md) are implemented and tested locally.
 The [public HTTP adapter and linked explorer](HTTP.md) are implemented locally;
 deployment remains ahead.
+The first public preview will use that single-shard adapter. The two-member
+barrier/recovery laboratory remains tested; sharded public HTTP and collection
+movement are not launch prerequisites. Finish independent backup custody, a
+recovery-loss policy and an operator rehearsal before opening public writes.
 The running workbench/store/channels are unchanged;
 the older implementation is preserved on
 [reference/pre-native-core-2026-11-02](https://github.com/nickjhay/sprigrun/tree/reference/pre-native-core-2026-11-02).

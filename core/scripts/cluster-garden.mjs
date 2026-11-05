@@ -9,7 +9,7 @@ import { keyRecordBytes, signAction } from '../src/authority.ts';
 import { contentAddress, textBytes, utf8 } from '../src/bytes.ts';
 import { parseReceipt } from '../src/receipt.ts';
 import { canonical } from '../host/archive.ts';
-import { captureCluster, importCluster, verifyCluster } from './cluster-recovery.mjs';
+import { captureCluster, verifyCluster } from './cluster-recovery.mjs';
 const directory=await mkdtemp(join(tmpdir(),'sprig-cluster-garden-')), live=join(directory,'live');
 const firstId=crypto.randomUUID().replaceAll('-',''), finalId=crypto.randomUUID().replaceAll('-','');
 let host;
@@ -36,12 +36,12 @@ try {
   await finish(host.controller,finalId);const deltaDir=join(directory,'delta');await mkdir(deltaDir);
   const bases=Object.fromEntries(Object.keys(base.files).map(n=>[n,{files:base.files[n],digest:base.plan.finals[n].footer.chain}]));
   const bundle=await captureCluster(host,deltaDir,finalId,bases);
-  await verifyCluster(bundle.plan,bundle.files,bundle.digest);
+  const checked=await verifyCluster(bundle.plan,bundle.files,bundle.digest);
   await host.dispose();host=null;await rm(live,{recursive:true,force:true});
   console.log('Saved a full cluster snapshot and its suffix; removed disposable live SQL and R2.');
   host=await localCluster({directory:live,restoring:true});
   await host.controller.restoreBegin(canonical(bundle.plan),bundle.digest,'old-writers-fenced');
-  await importCluster(host,bundle,bundle.digest);await host.controller.fail('restore-verify:fern');
+  await checked.restore(host);await host.controller.fail('restore-verify:fern');
   for(;;)try{await host.controller.restoreStep(bundle.digest);}catch(e){if(!e.message.includes('injected_restore-verify:fern'))throw e;break;}
   await host.dispose();host=await localCluster({directory:live,restoring:true});
   console.log('Lost a verification reply; restarted with the same pinned plan.');

@@ -187,6 +187,18 @@ acknowledging. Gaps, conflicting duplicates, future/backwards epochs and invalid
 schemas fail. Identical delayed delivery never rewinds a decision. The policy
 cursor is internal; it is not a global order of public submissions. The operator
 feed and status are available at `/admin/policy?after=0`.
+Follower status includes the durable applied position and ephemeral refresh
+diagnostics: busy, last attempt/success time, last error stage and last observed
+authority position. Successful refresh time records completion, including a
+partial batch; compare applied/observed positions for remaining known backlog.
+Errors are fixed codes (`pull_failed`, `invalid_page`, `apply_failed`), never raw
+provider details. Diagnostics reset to unknown on restart, add no durable writes
+and do not claim policy is current while the authority is unreachable.
+
+`requiredReferences` describes retained authority, visible values/subjects and
+anchors for both live admission and historical recovery. Live admission checks
+current visibility and append authority; recovery checks accepted historical
+dependencies. A later hide or key block does not invalidate an earlier signature.
 
 ## Fixed-roster barrier laboratory
 

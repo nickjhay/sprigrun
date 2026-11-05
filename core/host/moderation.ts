@@ -81,16 +81,28 @@ export class Moderation {
 export class PolicyFollower {
   private due = 0;
   private busy = false;
+  private lastAttemptMs: number | null = null;
+  private lastSuccessMs: number | null = null;
+  private lastError: 'pull_failed' | 'invalid_page' | 'apply_failed' | null = null;
+  private through: string | null = null;
   private local: { position(): string; apply(changes: PolicyChange[]): Promise<void> };
   private pull: (after: string) => Promise<ReturnType<Moderation['page']>>;
   constructor(local: { position(): string; apply(changes: PolicyChange[]): Promise<void> },
     pull: (after: string) => Promise<ReturnType<Moderation['page']>>) { this.local = local; this.pull = pull; }
+  /** Ephemeral diagnostics, not proof of freshness. Durable truth is the applied cursor. */
+  status() {
+    return { busy: this.busy, lastAttemptMs: this.lastAttemptMs, lastSuccessMs: this.lastSuccessMs,
+      lastError: this.lastError, observedThrough: this.through, nextAttemptMs: this.due };
+  }
   async tick(now: number): Promise<void> {
     if (this.busy || now < this.due) return;
     this.busy = true;
+    this.lastAttemptMs = now;
     this.due = now + POLICY_REFRESH_MS; // Outages back off, retaining the last applied policy.
+    let stage: NonNullable<PolicyFollower['lastError']> = 'pull_failed';
     try {
       const after = this.local.position(), page = await this.pull(after);
+      stage = 'invalid_page';
       check(Array.isArray(page.changes) && page.changes.length <= POLICY_BATCH, 'policy_batch_limit');
       u64(page.after); u64(page.through);
       let cursor = after;
@@ -102,8 +114,13 @@ export class PolicyFollower {
       check(cursor === page.after && u64(cursor) <= u64(page.through)
         && page.more === (u64(cursor) < u64(page.through))
         && (!page.more || page.changes.length > 0), 'invalid_policy_page');
+      stage = 'apply_failed';
       await this.local.apply(page.changes);
+      this.through = page.through; this.lastSuccessMs = Date.now(); this.lastError = null;
       if (page.more) this.due = now; // Next tick continues; never loop over the whole backlog.
+    } catch (error) {
+      this.lastError = stage; // Fixed codes only; never retain provider errors or credentials.
+      throw error;
     } finally { this.busy = false; }
   }
 }
