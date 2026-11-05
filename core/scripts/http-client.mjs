@@ -39,7 +39,8 @@ export function nativeClient(origin, { token, fetcher = fetch, timeoutMs = 30000
                 const value = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
                 if (!response.ok) {
                     const code = value.split('\n', 1)[0];
-                    throw Error(`${response.status}: ${/^[a-z][a-z0-9_]{0,99}$/.test(code) ? code : 'request_failed'}`);
+                    const safeCode = /^[a-z][a-z0-9_]{0,99}$/.test(code) ? code : 'request_failed';
+                    throw Object.assign(Error(`${response.status}: ${safeCode}`), { status: response.status, code: safeCode });
                 }
                 return value;
             })()]);
@@ -53,6 +54,7 @@ export function nativeClient(origin, { token, fetcher = fetch, timeoutMs = 30000
     const qs = (pairs) => new URLSearchParams(pairs).toString();
     return {
         origin,
+        read: (path) => request(path),
         async publish(path, bytes, signature = null) {
             const action = signature === null ? actionBytes({ destination: origin + path, body: bytes }, origin) : bytes;
             if (signature !== null && parseAction(action, origin).destination !== origin + path)

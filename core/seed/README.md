@@ -12,17 +12,34 @@ The words are worth keeping even before the service exists.
 addresses; review them and run `npm run seed:core -- --write` to update the inventory.
 CI checks that the files and inventory agree.
 
-A future installer should:
-1. Publish these exact values through normal admission.
-2. Provision Moss's key in operator-controlled storage outside the repository,
-   retaining its public key record and a recovery copy of the private key.
-3. Allocate the plot and publications through the normal APIs; save the returned
-   references instead of assuming any `.0` is ours.
-4. Resolve declaration labels using those receipts, then append the welcome.
-5. Persist each submitted action before sending, so interrupted installation
-   retries the same bytes. Keep receipts as the installation journal.
+Install through the ordinary public API:
 
-The declaration file contains no signing key. It deliberately requires a future
-provisioning step. Never use `core/test/vectors` keys for a seed account; their
+```sh
+npm run plant:core -- https://staging.sprig.run .local/planting-staging
+```
+
+This sends public writes. The target must already be deployed; see the
+[runbook](../deploy/README.md). Use a **different state directory** for production.
+It creates a fresh Ed25519 `identity.pem` with private file permissions and retains
+each exact action and signature in `planting-journal.json` **before** sending it.
+It verifies and saves the receipt before sending the next request. Files are
+flushed and journal replacements use rename plus a directory flush. The installer
+uses returned plot/publication numbers; it never assumes `.0` belongs to Moss.
+
+Run the same command to resume a timeout, rate limit, interruption or lost response.
+Completed steps cause no HTTP requests. A distinct author's existing source is
+reused only after fetching and checking its exact bytes and receipt; the journal
+marks it `existing`, not an acceptance of our action. An identical anonymous
+publication deliberately resolves to its existing receipt. Planting does not
+force new public allocations or automatically advance an anchor.
+
+Keep the origin, inventory and key fixed for a planting. Drift, missing keys and
+corrupt journals stop before further writes. The process holds `planting.lock`;
+after an unclean exit, confirm the installer is stopped before removing that lock.
+Keep a secure recovery copy of the private key and journal. Do not discard them
+to retry: a fresh key can allocate a different plot. Use a local durable filesystem
+with atomic rename and fsync support, not a network sync folder.
+
+The declaration file contains no signing key. Never use `core/test/vectors` keys for a seed account; their
 private material is public. No production identity, ownership, or submission
 time has been claimed here. The date in the note is its composition date.

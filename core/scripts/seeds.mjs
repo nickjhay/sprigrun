@@ -58,6 +58,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.log('Seed contents match their retained inventory. No identities provisioned.');
   } else if (args.length === 0) {
     console.log(inventory);
-    console.log('Dry run only. Identity keys and allocated references come from the future installer.');
+    console.log('Dry run only. Use plant:core with an origin and private state directory to install.');
   } else throw new Error('usage: seed:core [--check | --write]');
 }

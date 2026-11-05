@@ -3,7 +3,9 @@
 This is the real SQLite-backed Durable Object, tested with local R2 through
 Miniflare. It is not connected to the existing public Worker or workbench yet.
 The production HTTP entrypoint and explorer live in [core/http](../HTTP.md).
-No production deployment or seed key is configured. Adapters under `core/test`
+The [deployment runbook](../deploy/README.md) includes isolated staging/production
+configurations, local preflight and a resumable installer. No deployment has been
+made and no production seed key has been provisioned. Adapters under `core/test`
 are test-only and expose privileged fault controls: never deploy them.
 
 ```sh

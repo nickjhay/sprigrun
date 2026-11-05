@@ -4,7 +4,7 @@ import { actionBytes } from '../src/action.ts';
 import { keyRecordBytes, signAction } from '../src/authority.ts';
 import { textBytes } from '../src/bytes.ts';
 import { values, identities, publications, messages } from '../seed/plan.mjs';
-/** Development seed installation through ordinary public admission, never direct SQL. */
+/** Shared planting sequence through public admission. plant.mjs adds durable restart state. */
 export async function plantLocal(client, privatePem) {
     const key = createPrivateKey(privatePem);
     const rawPublic = Buffer.from(createPublicKey(key).export({ format: 'jwk' }).x, 'base64url');
