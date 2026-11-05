@@ -173,14 +173,14 @@ URL. Fixed table queries only; there is no generic RPC or arbitrary SQL endpoint
 | `POST /admin/block-author` | `{"key":"/sea/HASH_LENGTH","blocked":true}` |
 | `GET /admin/policy?after=0` | Bounded policy history and last applied position |
 | `POST /admin/cut` | Empty body; closes an epoch |
-| `GET /admin/snapshot/header?epoch=N` | Exact archive header |
-| `GET /admin/snapshot/page?epoch=N&table=T&after=C` | Bounded eligible keys |
-| `GET /admin/snapshot/record?epoch=N&table=T&key=K` | One exact archive record |
-| `GET /admin/snapshot/batch?epoch=N&table=T&after=C` | Bounded metadata records; sources use individual reads |
+| `GET /admin/snapshot/header?epoch=N` | Full header; add `base=B&chain=SHA256` for a delta |
+| `GET /admin/snapshot/page?epoch=N&after=C` | Bounded journal positions |
+| `GET /admin/snapshot/record?epoch=N&position=P` | One exact archive record |
+| `GET /admin/snapshot/batch?epoch=N&after=C` | Bounded ordered records, including accepted source bodies |
 | `GET /admin/recovery/status` | Persistent recovery status |
-| `POST /admin/restore/begin` | JSON containing canonical `header` and `footer` strings |
+| `POST /admin/restore/begin` | JSON containing canonical `header`/`footer` strings and final trusted `target` digest |
 | `POST /admin/restore/record?index=N` | One canonical archive line |
-| `POST /admin/restore/finish` | Empty body; bounded verification; repeat while phase is `verifying` |
+| `POST /admin/restore/finish` | Empty body; finish this segment (`awaiting_delta` or `restored`) |
 | `POST /admin/restore/release` | JSON `chain` and `confirmation: "history-reconciled"` |
 
 A separate `BACKUP_TOKEN` secret can authorize snapshot reads and `POST /admin/cut`
@@ -238,24 +238,13 @@ oversized bodies, shared upload slots, operator auth, suppression, corrupt R2,
 and authenticated recovery. HTML is parsed and links are followed in integration
 tests; this is not a substitute for visual browser testing.
 
-## Schema 3 transition (before deployment)
+## Schema 4 transition (before deployment)
 
-This version uses database schema 3 and archive `sprig-native-snapshot/3`.
-Opening schema 1 or 2 fails before any schema changes; importing a v1/v2 archive fails
-with `archive_version`. No local data is deleted or silently migrated.
-
-Keep an old directory/archive intact. To try the new core explicitly:
-
-```sh
-npm run dev:core -- --state .local/native-http-v3 --operator
-```
-
-For the previous reader/implementation, use a separate checkout of commit
-`458e572e3f435c45da37e245b6d89525ceb810b4` (PR #20), including its lockfile.
-Do not feed a v1/v2 archive into the new restore target or reopen its directory with
-a new identity. No production migration is needed yet; a conversion tool is not
-part of this change. Public action/key/plot/receipt formats remain version 1;
-the database/archive version bump does not rewrite signed bytes or old receipts.
+The database is schema 4, the archive is `sprig-native-snapshot/4`, and the backup
+witness is version 2. Old state is refused before mutation, never reset silently.
+Use a fresh directory explicitly (`--state .local/native-http-v4`) and preserve
+old files. [RECOVERY.md](RECOVERY.md#schema-4-transition-before-deployment) identifies
+the previous reader and explains the transition. Public signed formats stay v1.
 
 ## Separate content and author policies
 

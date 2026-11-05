@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { localNative } from '../scripts/local-native.mjs';
 import { backup, restore, verify, lines } from '../scripts/recover.mjs';
 import { action, drillPolicy, origin, plant } from '../scripts/recovery-garden.mjs';
-import { canonical, initial, advance, parseLine } from '../host/archive.ts';
+import { canonical, digest, parseLine } from '../host/archive.ts';
 import { textBytes, utf8 } from '../src/bytes.ts';
 import { signAction } from '../src/authority.ts';
 import { parseReceipt } from '../src/receipt.ts';
@@ -27,9 +27,9 @@ async function target(t, options = {}) {
 }
 async function changed(change) {
   const rows = all.map(parseLine); change(rows);
-  let p = await initial(rows[0]);
-  for (const r of rows.slice(1, -1)) p = await advance(p, r, canonical(r));
-  const footer = { type: 'end', count: p.count, chain: p.chain };
+  let chain = await digest(canonical(rows[0]));
+  for (const r of rows.slice(1, -1)) chain = await digest(chain + '\n' + canonical(r));
+  const footer = { type: 'end', count: String(rows.length - 2), chain };
   rows[rows.length - 1] = footer;
   const file = join(scratch, 'changed-' + serial++ + '.jsonl');
   await writeFile(file, rows.map(canonical).join('\n') + '\n');
@@ -154,7 +154,7 @@ test('recomputed checksum cannot substitute for signature, entry or acceptance v
     const tampered = await changed(change), core = await target(t);
     await verify(tampered.file, tampered.footer.chain); // structural validation alone is insufficient
     await assert.rejects(restore(core, tampered.file, tampered.footer.chain));
-    assert.equal((await core.restoreStatus()).phase, 'verifying');
+    assert.equal((await core.restoreStatus()).phase, 'importing');
     await assert.rejects(core.read(garden.source), /recovery_mode/);
     await assert.rejects(core.restoreRelease(tampered.footer.chain, 'history-reconciled'), /restore_not_complete/);
   }
@@ -169,8 +169,9 @@ test('a cut stays stable after later appends, visibility changes and other cuts;
   await core.blockAuthor(planted.key, false);
   for (let i = 0; i < 40; i++) await core.submit(action('/grove/aaa_' + i, planted.source + '\n'));
   await core.cut();
-  const first = await core.snapshotPage(epoch, 'results', '/grove/');
-  assert.deepEqual(first.keys, []); assert.equal(first.done, false); assert.ok(first.after);
+  const cutPosition = JSON.parse(headerBefore).control.position;
+  const first = await core.snapshotPage(epoch, cutPosition);
+  assert.deepEqual(first.keys, []); assert.equal(first.done, true); assert.equal(first.after, cutPosition);
   const file = join(scratch, 'later-copy.jsonl');
   const b = await backup(core, file, epoch), rows = [];
   for await (const line of lines(file)) rows.push(parseLine(line));
@@ -181,7 +182,7 @@ test('a cut stays stable after later appends, visibility changes and other cuts;
   const recovered = await target(t);
   assert.equal((await restore(recovered, file, b.footer.chain)).phase, 'restored');
   assert.equal(await core.snapshotHeader(epoch), headerBefore);
-  await assert.rejects(core.snapshotPage(epoch, 'control; DROP TABLE entries', ''), /archive_table/);
+  await assert.rejects(core.snapshotPage(epoch, 'control; DROP TABLE entries'), /invalid_u64/);
 });
 
 test('backup publication is exclusive and leaves no partial files on failure', async t => {
@@ -206,23 +207,24 @@ test('empty history and a maximally escaped source both fit the bounded archive 
   assert.equal((await restore(core, file, saved.footer.chain)).phase, 'restored');
 });
 
-test('result verification is bounded, survives restart and keeps forward references quarantined', async t => {
+test('ordered record verification is bounded, survives restart and stays quarantined until the cut', async t => {
   const original = await localNative({ policy: drillPolicy }); t.after(() => original.dispose());
   const g = await plant(original.core);
-  // Chats sort before their grove and source dependencies; source rows have no acceptance metadata.
+  // The journal now places predecessors before dependents; each import verifies one bounded record.
   for (let i = 0; i < 40; i++) await original.core.submit(action('/chat' + g.grove, 'batch ' + i));
   const file = join(scratch, 'two-pass.jsonl'), b = await backup(original.core, file);
   const directory = join(scratch, 'verify-restart');
   let host = await localNative({ directory, policy: drillPolicy, restoring: true }); t.after(() => host.dispose());
   const lines = (await readFile(file, 'utf8')).trimEnd().split('\n');
   await host.core.restoreBegin(lines[0], lines.at(-1));
-  for (let i = 1; i < lines.length - 1; i++) await host.core.restoreRecord(String(i), lines[i]);
-  const partial = await host.core.restoreFinish();
-  assert.equal(partial.phase, 'verifying'); assert.ok(partial.verifiedThrough.startsWith('/chat/'));
+  for (let i = 1; i <= 32; i++) await host.core.restoreRecord(String(i), lines[i]);
+  const partial = await host.core.restoreStatus();
+  assert.equal(partial.phase, 'importing'); assert.equal(partial.position, '32');
+  await assert.rejects(host.core.restoreFinish(), /archive_incomplete/);
   await assert.rejects(host.core.restoreRelease(b.footer.chain, 'history-reconciled'), /restore_not_complete/);
   await host.dispose(); host = await localNative({ directory, policy: drillPolicy });
   await assert.rejects(host.core.read(g.source), /recovery_mode/);
-  assert.equal((await host.core.restoreStatus()).verifiedThrough, partial.verifiedThrough);
+  assert.equal((await host.core.restoreStatus()).position, partial.position);
   await host.dispose(); host = await localNative({ directory, policy: drillPolicy, restoring: true });
   assert.equal((await restore(host.core, file, b.footer.chain)).phase, 'restored');
   await host.core.restoreRelease(b.footer.chain, 'history-reconciled');
@@ -259,7 +261,7 @@ test('missing and repeated policy facts cannot be hidden by recomputing the arch
   const missing = await changed(rows => {
     const at = rows.findLastIndex(r => r.type === 'moderation'); rows.splice(at, 1);
   });
-  await assert.rejects(verify(missing.file, missing.footer.chain), /archive_accounting/);
+  await assert.rejects(verify(missing.file, missing.footer.chain), /archive_position_gap/);
   const repeated = await changed(rows => {
     const policies = rows.filter(r => r.type === 'moderation');
     policies[2].row.active = policies[1].row.active; // Same plot hide decision twice.

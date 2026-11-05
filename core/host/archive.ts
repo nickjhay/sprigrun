@@ -10,20 +10,22 @@ import { validateChange, type PolicyChange } from './moderation.ts';
 import { policy, type Policy } from './policy.ts';
 import type { Control, Result, Source } from './state.ts';
 
-export const FORMAT = 'sprig-native-snapshot/3';
+export const FORMAT = 'sprig-native-snapshot/4';
 export const MAX_LINE = 2 * 1024 * 1024;
 export const PAGE_SIZE = 32;
 export const TABLES = ['sources', 'results', 'moderation', 'cuts'] as const;
-export type Table = typeof TABLES[number];
 export type Cut = { epoch: string; control: string; at_ms: string };
+export type Base = { chain: string; cut: Cut };
 export type Header = { type: 'header'; format: typeof FORMAT; epoch: string; capturedAtMs: string;
-  control: Control; policy: Policy };
-export type Record = { type: 'sources'; row: Source; body: string | null }
-  | { type: 'results'; row: Result }
-  | { type: 'moderation'; row: PolicyChange } | { type: 'cuts'; row: Cut };
+  control: Control; policy: Policy; base: Base | null };
+export type Record = ({ type: 'sources'; row: Source }
+  | { type: 'results'; row: Result; body: string | null }
+  | { type: 'moderation'; row: PolicyChange } | { type: 'cuts'; row: Cut }
+  | { type: 'pause'; paused: boolean }) & { position: string };
 export type End = { type: 'end'; count: string; chain: string };
-export type Progress = { count: string; chain: string; order: string;
-  moderation: string; accepted: string; debit: string; reserved: string; bodies: string; published: string; cuts: string };
+export type Progress = { count: string; chain: string; position: string;
+  moderation: string; accepted: string; debit: string; reserved: string;
+  epoch: string; paused: boolean; atCut: boolean };
 
 export function fields(value: unknown, names: readonly string[]): asserts value is { [key: string]: any } {
   check(value !== null && typeof value === 'object' && !Array.isArray(value), 'archive_fields');
@@ -68,9 +70,10 @@ export function validatePolicy(value: unknown): Policy {
   return policy(value as Policy);
 }
 export function validateControl(value: unknown): Control {
-  fields(value, ['schema', 'origin', 'epoch', 'paused', 'growth', 'burst', 'attempts', 'moderation', 'accepted', 'reservedBytes', 'acceptedDebit']);
-  check(value.schema === 3 && typeof value.paused === 'boolean', 'archive_control');
-  canonicalOrigin(value.origin); u64(value.epoch); u64(value.accepted); u64(value.moderation);
+  fields(value, ['schema', 'origin', 'journal', 'position', 'epoch', 'paused', 'growth', 'burst', 'attempts', 'moderation', 'accepted', 'reservedBytes', 'acceptedDebit']);
+  check(value.schema === 4 && typeof value.paused === 'boolean', 'archive_control');
+  check(matches(/^[0-9a-f]{32}$/, value.journal), 'archive_journal');
+  u64(value.position); canonicalOrigin(value.origin); u64(value.epoch); u64(value.accepted); u64(value.moderation);
   decimal(value.reservedBytes); decimal(value.acceptedDebit);
   for (const name of ['growth', 'burst', 'attempts']) {
     fields(value[name], ['tokens', 'atMs', 'remainder']);
@@ -79,20 +82,32 @@ export function validateControl(value: unknown): Control {
   return value as Control;
 }
 export function validateHeader(value: unknown): Header {
-  fields(value, ['type', 'format', 'epoch', 'capturedAtMs', 'control', 'policy']);
-  check(value.type === 'header' && value.format === FORMAT, 'archive_version');
+  check(value !== null && typeof value === 'object' && (value as Header).format === FORMAT, 'archive_version');
+  fields(value, ['type', 'format', 'epoch', 'capturedAtMs', 'control', 'policy', 'base']);
+  check(value.type === 'header', 'archive_version');
   u64(value.epoch); nextU64(value.epoch); u64(value.capturedAtMs);
-  const c = validateControl(value.control); validatePolicy(value.policy);
-  check(c.epoch === value.epoch, 'archive_cut_mismatch');
-  check(textBytes(canonical(value)).length <= 16384, 'archive_header_limit');
+  const c = validateControl(value.control), p = validatePolicy(value.policy);
+  check(c.epoch === value.epoch && u64(c.position) > 0n, 'archive_cut_mismatch');
+  if (value.base !== null) {
+    fields(value.base, ['chain', 'cut']); hash(value.base.chain);
+    const base = cutHeader(value.base.cut);
+    check(base.control.origin === c.origin && base.control.journal === c.journal, 'archive_base_journal');
+    check(canonical(base.policy) === canonical(p), 'archive_base_policy');
+    check(u64(base.epoch) < u64(c.epoch) && u64(base.control.position) < u64(c.position), 'archive_base_order');
+  }
+  check(textBytes(canonical(value)).length <= 32768, 'archive_header_limit');
   return value as Header;
 }
 export function cutHeader(row: Cut): Header {
+  fields(row, ['epoch', 'control', 'at_ms']);
   padded(row.epoch); smallText(row.control, 16384); u64(row.at_ms);
-  const { _policy, ...control } = JSON.parse(row.control);
+  const { _policy, ...control } = parseLine(row.control) as any;
   check(_policy !== undefined, 'cut_predates_archive_format');
   return validateHeader({ type: 'header', format: FORMAT, epoch: String(BigInt(row.epoch)),
-    capturedAtMs: row.at_ms, control, policy: _policy });
+    capturedAtMs: row.at_ms, control, policy: _policy, base: null });
+}
+export function cutFromHeader(h: Header): Cut {
+  return { epoch: orderedU64(h.epoch), control: canonical({ ...h.control, _policy: h.policy }), at_ms: h.capturedAtMs };
 }
 export function end(value: unknown): End {
   fields(value, ['type', 'count', 'chain']); check(value.type === 'end', 'archive_footer');
@@ -100,6 +115,7 @@ export function end(value: unknown): End {
 }
 export function recordKey(record: Record): string {
   switch (record.type) {
+    case 'pause': return record.paused ? '1' : '0';
     case 'sources': return record.row.address;
     case 'results': return record.row.path;
     case 'moderation': return record.row.position;
@@ -109,8 +125,12 @@ export function recordKey(record: Record): string {
 export async function validateRecord(value: unknown, h: Header): Promise<Record> {
   check(value !== null && typeof value === 'object', 'archive_record');
   const r = value as Record;
-  check(TABLES.includes(r.type), 'archive_record');
-  fields(r, r.type === 'sources' ? ['type', 'row', 'body'] : ['type', 'row']);
+  check(r.type === 'pause' || TABLES.includes(r.type), 'archive_record');
+  fields(r, r.type === 'results' ? ['type', 'position', 'row', 'body'] : r.type === 'pause'
+    ? ['type', 'position', 'paused'] : ['type', 'position', 'row']);
+  padded(r.position);
+  check(BigInt(r.position) > 0n && r.position <= orderedU64(h.control.position), 'archive_position');
+  if (r.type === 'pause') { check(typeof r.paused === 'boolean', 'archive_pause'); return r; }
   const row = r.row;
   if (r.type === 'sources') {
     const s = r.row;
@@ -119,12 +139,13 @@ export async function validateRecord(value: unknown, h: Header): Promise<Record>
     integer(s.bytes); integer(s.debit, true); check(s.bytes === address.length && s.debit >= s.bytes, 'archive_source_size');
     padded(s.reserved_epoch); u64(s.reserved_at_ms);
     check(s.reserved_epoch <= orderedU64(h.epoch), 'archive_future_fact');
-    if (r.body !== null) {
-      smallText(r.body, LIMITS.sourceBytes);
-      check(await contentAddress(textBytes(r.body)) === s.address, 'archive_source_hash');
-    }
   } else if (r.type === 'results') {
     const a = r.row;
+    if (a.source === null) check(r.body === null, 'archive_inline_body');
+    else {
+      smallText(r.body, LIMITS.sourceBytes);
+      check(await contentAddress(textBytes(r.body)) === a.source, 'archive_source_hash');
+    }
     fields(a, ['path','collection','number','kind','value','controller','binding','action','epoch',
       'accepted_at_ms','debit','header','body','source','signature','key_record','author_binding','receipt']);
     const ref = parseReference(a.path);
@@ -159,12 +180,12 @@ export async function validateRecord(value: unknown, h: Header): Promise<Record>
     validateChange(r.row);
     check(r.row.position <= orderedU64(h.control.moderation), 'archive_future_policy');
   } else {
-    fields(r.row, ['epoch','control','at_ms']);
-    smallText(r.row.control, 16384); u64(r.row.at_ms);
-    const { _policy, ...control } = JSON.parse(r.row.control);
-    const old = validateControl(control);
-    if (_policy !== undefined) validatePolicy(_policy);
-    check(old.origin === h.control.origin && orderedU64(old.epoch) === r.row.epoch, 'archive_origin');
+    const old = cutHeader(r.row);
+    check(old.control.origin === h.control.origin && old.control.journal === h.control.journal, 'archive_origin');
+    check(canonical(old.policy) === canonical(h.policy), 'archive_policy');
+    check(old.control.position === String(BigInt(r.position)), 'archive_cut_position');
+    if (r.position === orderedU64(h.control.position))
+      check(canonical(old) === canonical({ ...h, base: null }), 'archive_cut_mismatch');
   }
   if (r.type !== 'sources') {
     padded(row.epoch); check(row.epoch <= orderedU64(h.epoch), 'archive_future_fact');
@@ -172,30 +193,39 @@ export async function validateRecord(value: unknown, h: Header): Promise<Record>
   return r;
 }
 export async function initial(h: Header): Promise<Progress> {
-  return { count: '0', chain: await digest(canonical(h)), order: '', moderation: '0', accepted: '0', debit: '0',
-    reserved: '0', bodies: '0', published: '0', cuts: '0' };
+  const c = h.base === null ? null : cutHeader(h.base.cut).control;
+  return { count: '0', chain: await digest(canonical(h)), position: c?.position ?? '0',
+    moderation: c?.moderation ?? '0', accepted: c?.accepted ?? '0', debit: c?.acceptedDebit ?? '0',
+    reserved: c?.reservedBytes ?? '0', epoch: c === null ? '0' : nextU64(c.epoch),
+    paused: c?.paused ?? false, atCut: false };
+}
+function accounting(p: Progress, c: Control) {
+  check(p.position === c.position && p.moderation === c.moderation && p.accepted === c.accepted
+    && p.debit === c.acceptedDebit && p.reserved === c.reservedBytes && p.paused === c.paused, 'archive_accounting');
 }
 export async function advance(p: Progress, r: Record, line: string): Promise<Progress> {
-  const order = TABLES.indexOf(r.type) + ':' + recordKey(r);
-  check(order > p.order, 'archive_order');
-  const q = { ...p, count: nextU64(p.count), order, chain: await digest(p.chain + '\n' + line) };
-  if (r.type === 'sources') {
-    q.reserved = String(BigInt(q.reserved) + BigInt(r.row.debit));
-    if (r.body !== null) q.bodies = nextU64(q.bodies);
-  }
+  check(r.position === orderedU64(nextU64(p.position)), 'archive_position_gap');
+  const q = { ...p, count: nextU64(p.count), position: String(BigInt(r.position)),
+    chain: await digest(p.chain + '\n' + line), atCut: false };
+  if (r.type === 'pause') { q.paused = r.paused; return q; }
+  const epoch = r.type === 'sources' ? r.row.reserved_epoch : r.row.epoch;
+  check(r.type === 'moderation' ? epoch <= orderedU64(p.epoch) : epoch === orderedU64(p.epoch), 'archive_fact_epoch');
+  if (r.type === 'sources') q.reserved = String(BigInt(q.reserved) + BigInt(r.row.debit));
   if (r.type === 'results') {
     q.accepted = nextU64(q.accepted); q.debit = String(BigInt(q.debit) + BigInt(r.row.debit));
-    if (r.row.kind === 'sea') q.published = nextU64(q.published);
   }
   if (r.type === 'moderation') {
     check(r.row.position === orderedU64(nextU64(q.moderation)), 'archive_policy_gap');
     q.moderation = nextU64(q.moderation);
   }
-  if (r.type === 'cuts') { check(r.row.epoch === orderedU64(q.cuts), 'archive_cut_gap'); q.cuts = nextU64(q.cuts); }
+  if (r.type === 'cuts') {
+    const c = cutHeader(r.row).control; accounting(q, c);
+    check(c.epoch === q.epoch, 'archive_cut_gap'); q.epoch = nextU64(q.epoch); q.atCut = true;
+  }
   return q;
 }
 export function complete(h: Header, p: Progress, footer: End) {
   check(p.count === footer.count && p.chain === footer.chain, 'archive_incomplete');
-  check(p.moderation === h.control.moderation && p.accepted === h.control.accepted && p.debit === h.control.acceptedDebit
-    && p.bodies === p.published && p.reserved === h.control.reservedBytes && p.cuts === nextU64(h.epoch), 'archive_accounting');
+  accounting(p, h.control);
+  check(p.atCut && p.epoch === nextU64(h.epoch), 'archive_final_cut');
 }

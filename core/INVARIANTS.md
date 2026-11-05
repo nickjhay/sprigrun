@@ -56,6 +56,8 @@
 
 ## Recovery obligations exercised by SQLite/R2 tests
 
+- Commit a reconstruction fact, its journal pointer and monotonic u64 recovery
+  position atomically. Rejected actions, retries and reads add no journal entry.
 - Copy a closed epoch while later commits continue. Project private preparations
   at the cut; preserve their debit without requiring unpublished bytes.
 - Restore times, numbers, accounting, key evidence, receipts, content hiding and author blocks
@@ -64,7 +66,9 @@
   authority and referenced facts before completing the import.
 - Commit each imported record with its resume cursor. A repeated acknowledgement
   or ambiguous R2 write must not duplicate history or debit.
-- Require an empty target, matching origin/policy and pinned archive digest.
+- Require an empty target, matching origin/policy and pinned final chain digest.
+  Bind each increment to the exact preceding cut/digest and journal identity.
+  Missing/reordered/duplicate positions or segments cannot complete the plan.
   Persist quarantine independently of environment settings; incomplete or invalid
   history cannot become readable by accidentally dropping the setting.
 - Leave restored writes paused and spendable credits zero. An old snapshot cannot

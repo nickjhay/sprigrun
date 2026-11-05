@@ -177,6 +177,7 @@ export class NativeCoordinator extends DurableObject<Env> {
       this.debit(c, bytes);
       this.db.sql.exec(`INSERT INTO sources VALUES (?, ?, ?, ?, ?)`,
         address, v.action.body.length, bytes, orderedU64(c.epoch), String(Date.now()));
+      this.db.record(c, 'sources', address);
       c.reservedBytes = String(BigInt(c.reservedBytes) + BigInt(bytes)); this.db.save(c);
     });
     await this.ctx.storage.sync();
@@ -250,6 +251,7 @@ export class NativeCoordinator extends DurableObject<Env> {
           path, name, number, t.kind, v.value, t.kind === 'plot' ? v.key : null, binding,
           v.id, epoch, now, debit, v.header, t.kind === 'sea' ? null : utf8(v.action.body),
           v.source, v.signature, v.keyRecord, v.authorBinding, receipt);
+        this.db.record(c, 'results', path);
         c.accepted = nextU64(c.accepted);
         c.acceptedDebit = String(BigInt(c.acceptedDebit) + BigInt(debit)); this.db.save(c);
         this.committing(); // A thrown fault rolls back allocation, debit AND identity.
@@ -381,7 +383,11 @@ export class NativeCoordinator extends DurableObject<Env> {
   async pause(paused: boolean): Promise<void> {
     this.normal();
     check(typeof paused === 'boolean', 'invalid_pause');
-    this.transaction(() => { const c = this.db.control(); c.paused = paused; this.db.save(c); });
+    this.transaction(() => {
+      const c = this.db.control();
+      if (c.paused === paused) return;
+      c.paused = paused; this.db.record(c, 'pause', paused ? '1' : '0'); this.db.save(c);
+    });
     await this.ctx.storage.sync();
   }
   /** The cut is constant-size. Pending R2 work will publish in the next epoch. */
@@ -389,21 +395,24 @@ export class NativeCoordinator extends DurableObject<Env> {
     this.normal();
     const epoch = this.transaction(() => {
       const c = this.db.control(), old = c.epoch;
+      this.db.record(c, 'cuts', orderedU64(old));
       this.db.sql.exec('INSERT INTO cuts VALUES (?, ?, ?)', orderedU64(old), canonical({ ...c, _policy: this.p }), String(Date.now()));
       c.epoch = nextU64(c.epoch); this.db.save(c); return old;
     });
     await this.ctx.storage.sync(); return epoch;
   }
-  snapshotHeader(epoch: string) { this.normal(); return this.recovery.header(epoch); }
-  snapshotPage(epoch: string, table: string, after: string) { this.normal(); return this.recovery.page(epoch, table, after); }
-  async snapshotBatch(epoch: string, table: string, after: string) {
+  snapshotHeader(epoch: string, baseEpoch: string | null = null, chain: string | null = null) {
+    this.normal(); return this.recovery.header(epoch, baseEpoch, chain);
+  }
+  snapshotPage(epoch: string, after: string) { this.normal(); return this.recovery.page(epoch, after); }
+  async snapshotBatch(epoch: string, after: string) {
     this.normal(); check(this.exporting < 2, 'snapshot_busy'); this.exporting++;
-    try { return await this.recovery.batch(epoch, table, after); }
+    try { return await this.recovery.batch(epoch, after); }
     finally { this.exporting--; }
   }
-  async snapshotRecord(epoch: string, table: string, key: string) {
+  async snapshotRecord(epoch: string, position: string) {
     this.normal(); check(this.exporting < 2, 'snapshot_busy'); this.exporting++;
-    try { return await this.recovery.record(epoch, table, key); } finally { this.exporting--; }
+    try { return await this.recovery.record(epoch, position); } finally { this.exporting--; }
   }
   private async restoring<T>(operation: () => Promise<T>): Promise<T> {
     check(this.env.CORE_RESTORE_MODE === '1', 'restore_mode_required');
@@ -412,7 +421,7 @@ export class NativeCoordinator extends DurableObject<Env> {
     try { return await operation(); } finally { this.recovering = false; }
   }
   restoreStatus() { return this.recovery.status(); }
-  restoreBegin(header: string, footer: string) { return this.restoring(() => this.recovery.begin(header, footer)); }
+  restoreBegin(header: string, footer: string, target?: string) { return this.restoring(() => this.recovery.begin(header, footer, target)); }
   restoreRecord(index: string, line: string) { return this.restoring(() => this.recovery.importRecord(index, line)); }
   restoreFinish() { return this.restoring(() => this.recovery.finish()); }
   restoreRelease(chain: string, confirmation: string) { return this.restoring(() => this.recovery.release(chain, confirmation)); }

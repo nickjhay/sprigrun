@@ -9,7 +9,7 @@ import { actionBytes, actionId } from '../src/action.ts';
 import { contentAddress, orderedU64, textBytes } from '../src/bytes.ts';
 import { keyRecordBytes, signAction, verifyAction } from '../src/authority.ts';
 import { nextAppendAction, parseReceipt, receiptForAction } from '../src/receipt.ts';
-import { backup, restore } from '../scripts/recover.mjs';
+import { backup, incrementalBackup, restore } from '../scripts/recover.mjs';
 import { DEFAULT_POLICY } from '../host/policy.ts';
 
 const origin = 'https://sprig.run';
@@ -137,14 +137,34 @@ test('lost acknowledgement and process restart retain receipt, order, time, and 
 test('a fault inside acceptance rolls back counter, action identity, receipt and growth debit', async t => {
   const mf = use(t), publication = await garden(mf), bytes = act('/chat' + publication, 'retry after fault');
   const before = await json(rpc(mf, '/stats'));
+  const journal = (await json(rpc(mf, '/rows'))).journal;
   await good(rpc(mf, '/fail'));
   await bad(submit(mf, bytes), 'injected_rollback');
   const failed = await json(rpc(mf, '/stats'));
   assert.equal(failed.accepted, before.accepted);
   assert.equal(failed.acceptedDebit, before.acceptedDebit);
   assert.equal(failed.growth.tokens, before.growth.tokens);
+  assert.equal(failed.position, before.position);
+  assert.deepEqual((await json(rpc(mf, '/rows'))).journal, journal);
   assert.equal((await json(rpc(mf, '/rows'))).results.length, 2);
   assert.equal(await accept(mf, bytes), '/chat/grove/fern.0/0');
+  const committed = await json(rpc(mf, '/stats'));
+  assert.equal(BigInt(committed.position), BigInt(before.position) + 1n);
+  await accept(mf, bytes);
+  await good(rpc(mf, '/read', { path: '/chat/grove/fern.0/0' }));
+  assert.equal((await json(rpc(mf, '/stats'))).position, committed.position);
+});
+
+test('exhausted recovery position fails closed without an unjournaled result or control change', async t => {
+  const mf = use(t), publication = await garden(mf);
+  await good(rpc(mf, '/journal-position', { position: '18446744073709551615' }));
+  const rows = await json(rpc(mf, '/rows')), before = await json(rpc(mf, '/stats'));
+  await bad(submit(mf, act('/chat' + publication, 'overflow')), 'u64_overflow');
+  await bad(rpc(mf, '/pause', { paused: true }), 'u64_overflow');
+  await bad(rpc(mf, '/cut'), 'u64_overflow');
+  assert.deepEqual(await json(rpc(mf, '/rows')), rows);
+  const after = await json(rpc(mf, '/stats'));
+  for (const k of ['position', 'epoch', 'accepted', 'acceptedDebit', 'paused']) assert.equal(after[k], before[k]);
 });
 
 test('failed source acceptance leaves a private, paid preparation; retry publishes it once', async t => {
@@ -324,10 +344,10 @@ test('pause blocks an in-flight commit and bounded preparation leaves operator c
 function recovery(mf) {
   return {
     cut: () => json(rpc(mf, '/cut')),
-    snapshotHeader: epoch => json(rpc(mf, '/snapshotHeader', { epoch })),
-    snapshotPage: (epoch, table, after) => json(rpc(mf, '/snapshotPage', { epoch, table, after })),
-    snapshotRecord: (epoch, table, key) => json(rpc(mf, '/snapshotRecord', { epoch, table, key })),
-    restoreBegin: (header, footer) => json(rpc(mf, '/restoreBegin', { header, footer })),
+    snapshotHeader: (epoch, base, chain) => json(rpc(mf, '/snapshotHeader', { epoch, base, chain })),
+    snapshotPage: (epoch, after) => json(rpc(mf, '/snapshotPage', { epoch, after })),
+    snapshotRecord: (epoch, position) => json(rpc(mf, '/snapshotRecord', { epoch, position })),
+    restoreBegin: (header, footer, target) => json(rpc(mf, '/restoreBegin', { header, footer, target })),
     restoreRecord: (index, line) => json(rpc(mf, '/restoreRecord', { index, line })),
     restoreFinish: () => json(rpc(mf, '/restoreFinish')),
   };
@@ -341,17 +361,26 @@ test('a pre-cut paid reservation restores without an unpublished R2 body, even w
     await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal((await json(rpc(mf, '/io'))).waiting, 1);
   const core = recovery(mf), epoch = await core.cut();
-  const page = await core.snapshotPage(epoch, 'sources', '');
-  const during = await core.snapshotRecord(epoch, 'sources', page.keys[0]);
-  assert.equal(JSON.parse(during).body, null);
+  const page = await core.snapshotPage(epoch, '0');
+  const during = await core.snapshotRecord(epoch, page.keys[0]);
+  assert.equal(JSON.parse(during).type, 'sources'); assert.equal(Object.hasOwn(JSON.parse(during), 'body'), false);
   await good(rpc(mf, '/release-put')); await good(pending);
-  assert.equal(await core.snapshotRecord(epoch, 'sources', page.keys[0]), during);
+  assert.equal(await core.snapshotRecord(epoch, page.keys[0]), during);
   const file = join(scratch, 'reservation.jsonl'), saved = await backup(core, file, epoch);
+  const deltaFile = join(scratch, 'reservation-delta.jsonl');
+  const delta = await incrementalBackup(core, deltaFile, file, saved.footer.chain);
   const target = start({}, undefined, true); t.after(() => target.dispose());
-  await restore(recovery(target), file, saved.footer.chain);
+  assert.equal((await restore(recovery(target), file, saved.footer.chain, delta.footer.chain)).phase, 'awaiting_delta');
   const rows = await json(rpc(target, '/rows')), io = await json(rpc(target, '/io'));
   assert.equal(rows.sources.length, 1);
   assert.equal(rows.results.length, 0); assert.equal(io.puts, 0); assert.equal(io.gets, 0);
+  assert.equal((await json(rpc(target, '/stats'))).reservedBytes, '8192');
+  assert.equal((await restore(recovery(target), deltaFile, delta.footer.chain)).phase, 'restored');
+  const published = await json(rpc(target, '/rows'));
+  assert.equal(published.sources.length, 1); assert.equal(published.results.length, 1);
+  assert.equal(published.sources[0].reserved_epoch, orderedU64('0'));
+  assert.equal(published.results[0].epoch, orderedU64('1'));
+  assert.equal((await json(rpc(target, '/io'))).puts, 1);
   assert.equal((await json(rpc(target, '/stats'))).reservedBytes, '8192');
 });
 
@@ -361,8 +390,9 @@ test('restore handles ambiguous R2 PUT and lost acknowledgements without duplica
   const target = start({}, undefined, true); t.after(() => target.dispose());
   await good(rpc(target, '/fail-put', { when: 'after' }));
   await assert.rejects(restore(recovery(target), file, saved.footer.chain), /injected_put_ambiguous/);
-  assert.equal((await json(rpc(target, '/restoreStatus'))).count, '0');
-  assert.equal((await json(rpc(target, '/rows'))).sources.length, 0);
+  assert.equal((await json(rpc(target, '/restoreStatus'))).count, '1');
+  assert.equal((await json(rpc(target, '/rows'))).sources.length, 1);
+  assert.equal((await json(rpc(target, '/rows'))).results.length, 0);
   await restore(recovery(target), file, saved.footer.chain);
   const io = await json(rpc(target, '/io'));
   assert.equal(io.puts, 2); assert.ok(io.gets >= 1);
@@ -498,11 +528,12 @@ test('a late policy with an older issue epoch cannot enter an already closed sna
   const before = await json(rpc(mf, '/snapshotHeader', { epoch }));
   await good(rpc(mf, '/policy-batch', [{ position: orderedU64('2'), effect: 'block',
     path: owner.key, active: 0, epoch: orderedU64(epoch), at_ms: String(Date.now()) }]));
-  const old = await json(rpc(mf, '/snapshotPage', { epoch, table: 'moderation', after: '' }));
-  assert.deepEqual(old.keys, [orderedU64('1')]);
+  const old = await json(rpc(mf, '/snapshotPage', { epoch, after: '0' }));
+  const cut = JSON.parse(before).control.position;
+  assert.equal(old.keys.at(-1), cut);
   assert.equal(await json(rpc(mf, '/snapshotHeader', { epoch })), before);
-  await bad(rpc(mf, '/snapshotRecord', { epoch, table: 'moderation', key: orderedU64('2') }), 'archive_future_policy');
+  await bad(rpc(mf, '/snapshotRecord', { epoch, position: String(BigInt(cut) + 1n) }), 'archive_position');
   const nextEpoch = await json(rpc(mf, '/cut'));
-  const next = await json(rpc(mf, '/snapshotPage', { epoch: nextEpoch, table: 'moderation', after: '' }));
-  assert.deepEqual(next.keys, [orderedU64('1'), orderedU64('2')]);
+  const next = await json(rpc(mf, '/snapshotPage', { epoch: nextEpoch, after: cut }));
+  assert.equal(next.keys.length, 2); // Late policy and the next cut.
 });

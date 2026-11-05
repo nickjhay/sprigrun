@@ -125,7 +125,7 @@ export class Inspection {
             }>(`SELECT value FROM ${table} WHERE id=1`).toArray();
             return { table, rows: rows.map(r => JSON.parse(r.value)), after: '', more: false };
         }
-        const keys: Record<string, string> = { sources: 'address', heads: 'collection', results: 'path', moderation: 'position', cuts: 'epoch', recovery_sources: 'address' };
+        const keys: Record<string, string> = { sources: 'address', heads: 'collection', results: 'path', moderation: 'position', cuts: 'epoch', journal: 'position' };
         const key = Object.hasOwn(keys, table) ? keys[table]! : null;
         check(key, 'invalid_table');
         // Large bodies/evidence have a dedicated single-record endpoint, not 32 copies per table page.

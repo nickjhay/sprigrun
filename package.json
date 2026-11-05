@@ -31,7 +31,7 @@
     "test:acceptance": "node --test core/test/acceptance.integration.mjs",
     "demo:core": "node core/scripts/demo.mjs",
     "seed:core": "node core/scripts/seeds.mjs",
-    "test:recovery": "node --test core/test/recovery.integration.mjs",
+    "test:recovery": "node --test --test-concurrency=1 core/test/recovery*.integration.mjs",
     "demo:recovery": "node core/scripts/recovery-garden.mjs",
     "verify:recovery": "node core/scripts/recover.mjs verify",
     "dev:core": "node core/scripts/dev.mjs",
