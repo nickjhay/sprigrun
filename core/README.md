@@ -29,6 +29,7 @@ still work without it.
 
 - [OPERATIONS.md](OPERATIONS.md): independent backups, local rehearsal and editable costs.
 - [PROTOCOL.md](PROTOCOL.md): normative candidate v1 bytes, references and errors.
+- [host/README.md#logical-owners-and-eventual-policy](host/README.md#logical-owners-and-eventual-policy): collection ownership and independent hide/block policies.
 - [INVARIANTS.md](INVARIANTS.md): proof obligations, trust boundaries and next steps.
 - [seed/README.md](seed/README.md): contents we can carry into the public commons.
 

@@ -170,6 +170,8 @@ URL. Fixed table queries only; there is no generic RPC or arbitrary SQL endpoint
 | `GET /admin/result?path=RESULT_PATH` | One full retained result, including suppressed evidence |
 | `POST /admin/pause` | `{"paused":true}` |
 | `POST /admin/suppress` | `{"path":"/grove/fern.0","suppressed":true}` |
+| `POST /admin/block-author` | `{"key":"/sea/HASH_LENGTH","blocked":true}` |
+| `GET /admin/policy?after=0` | Bounded policy history and last applied position |
 | `POST /admin/cut` | Empty body; closes an epoch |
 | `GET /admin/snapshot/header?epoch=N` | Exact archive header |
 | `GET /admin/snapshot/page?epoch=N&table=T&after=C` | Bounded eligible keys |
@@ -236,21 +238,40 @@ oversized bodies, shared upload slots, operator auth, suppression, corrupt R2,
 and authenticated recovery. HTML is parsed and links are followed in integration
 tests; this is not a substitute for visual browser testing.
 
-## Schema 2 transition (before deployment)
+## Schema 3 transition (before deployment)
 
-This version uses database schema 2 and archive `sprig-native-snapshot/2`.
-Opening schema 1 fails before any schema changes; importing a v1 archive fails
+This version uses database schema 3 and archive `sprig-native-snapshot/3`.
+Opening schema 1 or 2 fails before any schema changes; importing a v1/v2 archive fails
 with `archive_version`. No local data is deleted or silently migrated.
 
 Keep an old directory/archive intact. To try the new core explicitly:
 
 ```sh
-npm run dev:core -- --state .local/native-http-v2 --operator
+npm run dev:core -- --state .local/native-http-v3 --operator
 ```
 
 For the previous reader/implementation, use a separate checkout of commit
-`353ad7fbdd212f1c5541d3c2ae6b37744e6acdb3` (PR #19), including its lockfile.
-Do not feed a v1 archive into the new restore target or reopen its directory with
+`458e572e3f435c45da37e245b6d89525ceb810b4` (PR #20), including its lockfile.
+Do not feed a v1/v2 archive into the new restore target or reopen its directory with
 a new identity. No production migration is needed yet; a conversion tool is not
 part of this change. Public action/key/plot/receipt formats remain version 1;
 the database/archive version bump does not rewrite signed bytes or old receipts.
+
+## Separate content and author policies
+
+Authenticated `POST /admin/suppress` retains its `{ "path": ..., "suppressed": true }`
+body. New `POST /admin/block-author` takes `{ "key": "/sea/HASH_LENGTH", "blocked": true }`.
+The latter blocks new actions through that key's direct reference or any plot
+alias. It accepts a canonical key-record address even before publication, for a
+preemptive block. It does not accept a plot as a key or grant any authority.
+Historical signatures and exact authorized retries remain available unless their
+material is separately hidden. Rejected new actions return `403 author_blocked`;
+attempt credit is charged, but allocation and publication debit do not advance.
+
+`GET /admin/policy?after=0` returns at most 32 ordered changes, the next decimal
+cursor, current high-water mark, and applied position/status. Follow `more`;
+never infer completeness from a partial page. The single local authority applies
+updates immediately. The minute-scale follower is groundwork for future shards,
+not a promise of a remote moderation service already running. Both endpoints
+require the full operator token; the backup credential cannot use them.
+The `moderation` table is also available in the existing operator inspector.

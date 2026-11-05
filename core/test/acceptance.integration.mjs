@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { build } from 'esbuild';
 import { Miniflare, Log, LogLevel } from 'miniflare';
 import { actionBytes, actionId } from '../src/action.ts';
-import { contentAddress, textBytes } from '../src/bytes.ts';
+import { contentAddress, orderedU64, textBytes } from '../src/bytes.ts';
 import { keyRecordBytes, signAction, verifyAction } from '../src/authority.ts';
 import { nextAppendAction, parseReceipt, receiptForAction } from '../src/receipt.ts';
 import { backup, restore } from '../scripts/recover.mjs';
@@ -250,15 +250,15 @@ test('suppression during preparation is rechecked; latest never rewinds and rece
   assert.equal(await accept(mf, act(base, 'late')), base + '/2');
 });
 
-test('authority suppression during verification/preparation prevents acceptance', async t => {
+test('author blocking during verification/preparation prevents a new acceptance', async t => {
   const mf = use(t), owner = await identity(mf);
   const bytes = act('/chat' + owner.plot, 'signed', owner.plot);
   await good(rpc(mf, '/hold'));
   const pending = submit(mf, bytes, await signAction(bytes, owner.pair.privateKey, origin));
   await held(mf);
-  await good(rpc(mf, '/suppress', { path: owner.key, suppressed: true }));
+  await good(rpc(mf, '/block-author', { key: owner.key, blocked: true }));
   await good(rpc(mf, '/release'));
-  await bad(pending, 'suppressed');
+  await bad(pending, 'author_blocked');
 });
 
 test('growth exhaustion rejects atomically; attempts meter rejected requests independently', async t => {
@@ -438,4 +438,71 @@ test('a private reservation claims no first-publication rights; a later signed c
   assert.equal(committed.reservedBytes, prepared.reservedBytes);
   await bad(submit(mf, anonymous), 'already_stored');
   assert.equal(await good(submit(mf, signed, signature)), receipt);
+});
+
+test('hiding a key changes public visibility, not retained signing authority; no evidence bypass', async t => {
+  const mf = use(t), owner = await identity(mf), publication = await garden(mf);
+  await good(rpc(mf, '/suppress', { path: owner.key, suppressed: true }));
+  const bytes = act('/chat' + publication, 'A hidden key can still sign.', owner.plot);
+  const signature = await signAction(bytes, owner.pair.privateKey, origin);
+  const result = await accept(mf, bytes, signature);
+  assert.equal(await good(rpc(mf, '/read', { path: result })), 'A hidden key can still sign.');
+  await bad(rpc(mf, '/evidence', { path: result }), 'suppressed');
+  await bad(submit(mf, bytes, signature), 'suppressed'); // Retry must not bypass receipt visibility.
+  await good(rpc(mf, '/suppress', { path: owner.key, suppressed: false }));
+  const evidence = await json(rpc(mf, '/evidence', { path: result }));
+  await verifyAction(textBytes(evidence.action), evidence.signature,
+    { keyRecord: textBytes(evidence.keyRecord), plotBinding: textBytes(evidence.plotBinding) }, origin);
+  assert.equal(await good(submit(mf, bytes, signature)), evidence.receipt);
+});
+
+test('a key block covers every author alias, preserves historical evidence and does not consume a number', async t => {
+  const mf = use(t), owner = await identity(mf), publication = await garden(mf);
+  const bytes = act('/chat' + publication, 'Before the block.', owner.plot);
+  const signature = await signAction(bytes, owner.pair.privateKey, origin);
+  const result = await accept(mf, bytes, signature);
+  const old = await json(rpc(mf, '/evidence', { path: result }));
+  const before = await json(rpc(mf, '/stats'));
+  await good(rpc(mf, '/block-author', { key: owner.key, blocked: true }));
+  for (const author of [owner.plot, owner.key]) {
+    const next = act(result, 'After the block.', author);
+    await bad(submit(mf, next, await signAction(next, owner.pair.privateKey, origin)), 'author_blocked');
+  }
+  assert.equal(await good(submit(mf, bytes, signature)), old.receipt);
+  assert.deepEqual(await json(rpc(mf, '/evidence', { path: result })), old);
+  assert.equal((await json(rpc(mf, '/stats'))).acceptedDebit, before.acceptedDebit);
+  assert.equal(await accept(mf, act(result, 'Anonymous stays open.')), '/chat' + publication + '/1');
+  await good(rpc(mf, '/block-author', { key: owner.key, blocked: false }));
+  const next = act(result, 'The key is admitted again.', owner.plot);
+  assert.equal(await accept(mf, next, await signAction(next, owner.pair.privateKey, origin)), '/chat' + publication + '/2');
+});
+
+test('an action accepted before policy delivery can be hidden later without rewriting history', async t => {
+  const mf = use(t), owner = await identity(mf);
+  const bytes = act('/chat' + owner.plot, 'Accepted before the operator block.', owner.plot);
+  const sig = await signAction(bytes, owner.pair.privateKey, origin), result = await accept(mf, bytes, sig);
+  const before = await json(rpc(mf, '/rows'));
+  await good(rpc(mf, '/block-author', { key: owner.key, blocked: true }));
+  await good(rpc(mf, '/suppress', { path: result, suppressed: true }));
+  await bad(rpc(mf, '/read', { path: result }), 'suppressed');
+  await bad(rpc(mf, '/evidence', { path: result }), 'suppressed');
+  const after = await json(rpc(mf, '/rows'));
+  assert.deepEqual(after.results, before.results); assert.deepEqual(after.heads, before.heads);
+});
+
+
+test('a late policy with an older issue epoch cannot enter an already closed snapshot', async t => {
+  const mf = use(t), owner = await identity(mf);
+  await good(rpc(mf, '/block-author', { key: owner.key, blocked: true }));
+  const epoch = await json(rpc(mf, '/cut'));
+  const before = await json(rpc(mf, '/snapshotHeader', { epoch }));
+  await good(rpc(mf, '/policy-batch', [{ position: orderedU64('2'), effect: 'block',
+    path: owner.key, active: 0, epoch: orderedU64(epoch), at_ms: String(Date.now()) }]));
+  const old = await json(rpc(mf, '/snapshotPage', { epoch, table: 'moderation', after: '' }));
+  assert.deepEqual(old.keys, [orderedU64('1')]);
+  assert.equal(await json(rpc(mf, '/snapshotHeader', { epoch })), before);
+  await bad(rpc(mf, '/snapshotRecord', { epoch, table: 'moderation', key: orderedU64('2') }), 'archive_future_policy');
+  const nextEpoch = await json(rpc(mf, '/cut'));
+  const next = await json(rpc(mf, '/snapshotPage', { epoch: nextEpoch, table: 'moderation', after: '' }));
+  assert.deepEqual(next.keys, [orderedU64('1'), orderedU64('2')]);
 });

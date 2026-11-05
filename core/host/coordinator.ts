@@ -13,6 +13,7 @@ import { loadSource, putSource } from './objects.ts';
 import { canonical } from './archive.ts';
 import { Recovery } from './recovery.ts';
 import { Inspection, type Browse } from './inspection.ts';
+import { Moderation, POLICY_BATCH, POLICY_REFRESH_MS } from './moderation.ts';
 import { AlreadyStored } from './errors.ts';
 import { handleHttp } from '../http/routes.ts';
 import { body, httpPolicy, ReadGate, HttpError, uploadHeaders, urlFor, query, type HttpPolicy } from '../http/transport.ts';
@@ -31,6 +32,7 @@ type Verified = { action: Action; id: string; key: string | null; binding: strin
 export class NativeCoordinator extends DurableObject<Env> {
   protected readonly db: State;
   private readonly p: Policy;
+  protected readonly moderation: Moderation;
   private readonly origin: string;
   private active = 0;
   private readonly recovery: Recovery;
@@ -46,6 +48,7 @@ export class NativeCoordinator extends DurableObject<Env> {
     this.origin = canonicalOrigin(env.CORE_ORIGIN);
     this.p = policy(env.CORE_POLICY);
     this.db = new State(ctx.storage.sql, this.origin, this.p, Date.now());
+    this.moderation = new Moderation(this.db);
     this.recovery = new Recovery(ctx, this.db, env.SOURCES, this.p);
     this.inspection = new Inspection(this.db, p => this.readable(p), id => this.actionRecord(id), this.origin);
     this.http = httpPolicy(env.CORE_HTTP_POLICY); this.reads = new ReadGate(this.http);
@@ -64,8 +67,19 @@ export class NativeCoordinator extends DurableObject<Env> {
       && !waitSeconds(c.burst, this.p.burst, bytes), 'growth_limit');
     c.growth.tokens -= bytes; c.burst.tokens -= bytes;
   }
-  private visible(path: string) { check(this.db.suppression(path)?.suppressed !== 1, 'suppressed'); }
+  private visible(path: string) { check(!this.moderation.active('hide', path), 'suppressed'); }
 
+  /** Accepted immutable facts are trusted even when their public view is hidden. */
+  private retained(path: string): Result | null {
+    const ref = parseReference(path);
+    check(ref.kind !== 'step' && ref.kind !== 'chat', 'unsupported_read');
+    const row = this.db.result(path);
+    check(row, ref.kind === 'sea' ? 'source_unavailable' : 'entry_unavailable');
+    return ref.kind === 'sea' ? null : row;
+  }
+  private authorAllowed(v: Verified) {
+    if (v.key !== null) check(!this.moderation.active('block', v.key), 'author_blocked');
+  }
   /** Bounded dependency checks: publication -> source and optional plot. */
   private readable(path: string): Result | null {
     this.visible(path);
@@ -85,8 +99,8 @@ export class NativeCoordinator extends DurableObject<Env> {
   private conditions(v: Verified) {
     this.normal();
     const a = v.action, t = a.target;
-    if (a.author !== null) this.readable(a.author);
-    if (v.key !== null) this.readable(v.key);
+    if (a.author !== null) this.retained(a.author);
+    if (v.key !== null) this.retained(v.key);
     if (v.value !== null) this.readable(v.value);
     if (t.kind === 'sea') { this.visible('/sea/' + v.source); return; }
     if (t.kind === 'plot') check(v.key !== null, 'author_required');
@@ -112,13 +126,13 @@ export class NativeCoordinator extends DurableObject<Env> {
       id = await contentAddress(bytes);
     } else {
       check(typeof signature === 'string', 'signature_required');
-      const author = this.readable(action.author);
+      const author = this.retained(action.author);
       key = author === null ? action.author : author.controller;
       check(key !== null, 'invalid_author');
       const keyRef = parseReference(key);
       check(keyRef.kind === 'sea', 'invalid_key_reference');
       check(parseAddress(keyRef.address).length <= LIMITS.recordBytes, 'key_record_limit');
-      this.readable(key);
+      this.retained(key);
       const keyBytes = await this.loadSource(keyRef.address);
       keyRecord = utf8(keyBytes);
       authorBinding = author?.binding ?? null;
@@ -152,7 +166,7 @@ export class NativeCoordinator extends DurableObject<Env> {
     const address = v.source!;
     this.transaction(() => {
       const c = this.db.control(); check(!c.paused, 'writes_paused');
-      this.conditions(v);
+      this.conditions(v); this.authorAllowed(v);
       if (this.db.source(address)) return;
       // Check room for acceptance too, but reserve only private bytes here.
       this.refresh(c);
@@ -194,7 +208,8 @@ export class NativeCoordinator extends DurableObject<Env> {
       const { bytes, signature } = await receive();
       const v = await this.verify(bytes, signature);
       const existing = this.db.accepted(v.id);
-      if (existing) { this.readable(existing.path); return existing.receipt; }
+      if (existing) { this.actionRecord(existing.path); return existing.receipt; }
+      this.authorAllowed(v);
       if (v.source !== null) this.freshSource(v.source);
       // Changed admission limits do not invalidate already accepted retries.
       if (v.action.target.kind === 'chat') check(v.action.body.length <= this.p.chatBytes, 'chat_size_limit');
@@ -205,7 +220,8 @@ export class NativeCoordinator extends DurableObject<Env> {
         const c = this.db.control(); check(!c.paused, 'writes_paused');
         this.conditions(v); // Recheck every mutable condition after all awaits.
         const prior = this.db.accepted(v.id);
-        if (prior) { this.readable(prior.path); return prior.receipt; }
+        if (prior) { this.actionRecord(prior.path); return prior.receipt; }
+        this.authorAllowed(v);
         const t = v.action.target, now = String(Date.now()), epoch = orderedU64(c.epoch);
         if (v.source !== null) this.freshSource(v.source);
         const debit = Math.max(this.p.minimumDebit,
@@ -341,15 +357,27 @@ export class NativeCoordinator extends DurableObject<Env> {
     this.normal();
     const ref = parseReference(path); check(typeof suppressed === 'boolean', 'invalid_suppression');
     check(ref.kind === 'sea' || this.db.result(path), 'entry_unavailable');
+    await this.changePolicy('hide', path, suppressed);
+  }
+  async blockAuthor(key: string, blocked: boolean): Promise<void> {
+    this.normal();
+    check(typeof blocked === 'boolean', 'invalid_author_block');
+    check(parseReference(key).kind === 'sea', 'key_reference_required');
+    // Allow a preemptive block by canonical key-record address. It cannot grant authority.
+    await this.changePolicy('block', key, blocked);
+  }
+  private async changePolicy(effect: 'hide' | 'block', path: string, active: boolean) {
     this.transaction(() => {
-      const c = this.db.control(), previous = this.db.suppression(path);
-      if (previous && !!previous.suppressed === suppressed) return;
-      const revision = previous ? nextU64(String(BigInt(previous.revision))) : '0';
-      this.db.sql.exec('INSERT INTO suppressions VALUES (?, ?, ?, ?, ?)', path,
-        orderedU64(revision), orderedU64(c.epoch), Number(suppressed), String(Date.now()));
+      if (this.moderation.decision(effect, path)?.active === Number(active)) return;
+      const c = this.db.control();
+      this.moderation.apply([{ position: orderedU64(nextU64(c.moderation)), effect, path,
+        active: Number(active), epoch: orderedU64(c.epoch), at_ms: String(Date.now()) }]);
     });
     await this.ctx.storage.sync();
   }
+  policyPage(after: string) { this.normal(); return this.moderation.page(after); }
+  policyStatus() { this.normal(); return { applied: this.moderation.position(),
+    mode: 'local-authority', refreshTargetMs: POLICY_REFRESH_MS, batchLimit: POLICY_BATCH }; }
   async pause(paused: boolean): Promise<void> {
     this.normal();
     check(typeof paused === 'boolean', 'invalid_pause');

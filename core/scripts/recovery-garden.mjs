@@ -39,10 +39,11 @@ export async function plant(core) {
   const chat = await add('/chat' + grove, 'There is room for another fern.', plot, pair.privateKey);
   const hidden = await add(chat, 'A leaf kept in the archive.');
   await core.suppress(hidden, true);
-  // Prefix-related paths exercise the archive's suppression tuple ordering.
+  // Interleave target policies; the archive preserves their global policy position.
   await core.suppress(plot, true); await core.suppress(plot, false);
   await core.suppress(publication, true); await core.suppress(publication, false);
-  return { history, source, key, plot, grove, publication, chat, hidden };
+  await core.blockAuthor(key, true);
+  return { history, source, key, plot, grove, publication, chat, hidden, pair };
 }
 export async function drill(file) {
   const work = await mkdtemp(join(tmpdir(), 'sprig-recovery-'));
@@ -76,11 +77,11 @@ export async function drill(file) {
         assert.equal((await host.core.evidence(item.result)).action, utf8(item.bytes));
       }
     }
-    for (const k of ['accepted', 'acceptedDebit', 'reservedBytes'])
+    for (const k of ['moderation', 'accepted', 'acceptedDebit', 'reservedBytes'])
       assert.equal((await host.core.stats())[k], originalStats[k]);
     const receipt = await host.core.submit(action(garden.hidden, 'The fern came back.'));
     assert.equal(parseReceipt(textBytes(receipt), origin).result, origin + '/chat' + garden.grove + '/2');
-    console.log('Exact receipts, signatures, plot authority, suppression and quota totals survived.');
+    console.log('Exact receipts, signatures, plot authority, content hiding, author blocks and quota totals survived.');
     console.log('The next chat entry is /chat' + garden.grove + '/2 (the hidden /1 stays consumed).');
     console.log(`Archive: ${resolve(file)}\nTrusted chain: ${saved.footer.chain}`);
     console.log('One restored receipt:\n' + garden.history[5].receipt);

@@ -48,6 +48,7 @@ export class TestCoordinator extends NativeCoordinator {
     else if (command === 'release') { this.release?.(); this.release = null; this.hold = null; }
     else if (command === 'waiting') return this.waiting;
     else if (command === 'fail') this.fail = true;
+    else if (command === 'policy-batch') this.ctx.storage.transactionSync(() => this.moderation.apply(value));
     else if (command === 'head') this.db.sql.exec(
       'INSERT INTO heads VALUES (?, ?) ON CONFLICT(collection) DO UPDATE SET number=excluded.number',
       value.collection, orderedU64(value.number));
@@ -55,7 +56,7 @@ export class TestCoordinator extends NativeCoordinator {
       heads: this.db.sql.exec('SELECT * FROM heads ORDER BY collection').toArray(),
       sources: this.db.sql.exec('SELECT * FROM sources ORDER BY address').toArray(),
       results: this.db.sql.exec('SELECT * FROM results ORDER BY path').toArray(),
-      suppressions: this.db.sql.exec('SELECT * FROM suppressions ORDER BY path,revision').toArray(),
+      moderation: this.db.sql.exec('SELECT * FROM moderation ORDER BY position').toArray(),
       cuts: this.db.sql.exec('SELECT * FROM cuts ORDER BY epoch').toArray(),
     };
     else throw new Error('invalid_test_command');
@@ -81,6 +82,7 @@ export default {
       if (path === '/latest') return Response.json(await stub.latest(value.path));
       if (path === '/evidence') return Response.json(await stub.evidence(value.path));
       if (path === '/suppress') { await stub.suppress(value.path, value.suppressed); return Response.json(null); }
+      if (path === '/block-author') { await stub.blockAuthor(value.key, value.blocked); return Response.json(null); }
       if (path === '/pause') { await stub.pause(value.paused); return Response.json(null); }
       if (path === '/cut') return Response.json(await stub.cut());
       if (path === '/snapshotHeader') return Response.json(await stub.snapshotHeader(value.epoch));

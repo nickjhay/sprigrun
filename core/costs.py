@@ -83,7 +83,7 @@ def estimate(s: Scenario = Scenario(), prices: Prices = Prices()) -> dict:
     # Source paging + one verified R2 GET/record. Metadata is batched, not one GET/row.
     export_requests = (nsource + math.floor(nsource / 32) + 1
         + math.floor((nsource + nchat) / s.metadata_batch) + 1
-        + math.floor(cuts / s.metadata_batch) + 1 + 3)  # header, cut, empty suppression page
+        + math.floor(cuts / s.metadata_batch) + 1 + 3)  # header, cut, empty moderation page
     backups = copies * export_requests
     requests = s.reads + sources + chats + backups
     usage = Usage(worker_requests=requests + s.extra_worker_requests,
