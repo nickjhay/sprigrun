@@ -2,7 +2,7 @@
 
 3 November 2026. Executable protocol groundwork for the new public service at
 `https://sprig.run`. The protocol and [SQLite/R2 acceptance layer](host/README.md)
-and [whole-core recovery](RECOVERY.md) are implemented and tested locally.
+and [full/incremental recovery](RECOVERY.md) are implemented and tested locally.
 The [public HTTP adapter and linked explorer](HTTP.md) are implemented locally;
 deployment remains ahead.
 The running workbench/store/channels are unchanged;

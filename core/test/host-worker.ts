@@ -48,6 +48,9 @@ export class TestCoordinator extends NativeCoordinator {
     else if (command === 'release') { this.release?.(); this.release = null; this.hold = null; }
     else if (command === 'waiting') return this.waiting;
     else if (command === 'fail') this.fail = true;
+    else if (command === 'journal-position') {
+      const c = this.db.control(); c.position = value.position; this.db.save(c);
+    }
     else if (command === 'policy-batch') this.ctx.storage.transactionSync(() => this.moderation.apply(value));
     else if (command === 'head') this.db.sql.exec(
       'INSERT INTO heads VALUES (?, ?) ON CONFLICT(collection) DO UPDATE SET number=excluded.number',
@@ -57,6 +60,7 @@ export class TestCoordinator extends NativeCoordinator {
       sources: this.db.sql.exec('SELECT * FROM sources ORDER BY address').toArray(),
       results: this.db.sql.exec('SELECT * FROM results ORDER BY path').toArray(),
       moderation: this.db.sql.exec('SELECT * FROM moderation ORDER BY position').toArray(),
+      journal: this.db.sql.exec('SELECT * FROM journal ORDER BY position').toArray(),
       cuts: this.db.sql.exec('SELECT * FROM cuts ORDER BY epoch').toArray(),
     };
     else throw new Error('invalid_test_command');
@@ -85,11 +89,11 @@ export default {
       if (path === '/block-author') { await stub.blockAuthor(value.key, value.blocked); return Response.json(null); }
       if (path === '/pause') { await stub.pause(value.paused); return Response.json(null); }
       if (path === '/cut') return Response.json(await stub.cut());
-      if (path === '/snapshotHeader') return Response.json(await stub.snapshotHeader(value.epoch));
-      if (path === '/snapshotPage') return Response.json(await stub.snapshotPage(value.epoch, value.table, value.after));
-      if (path === '/snapshotRecord') return Response.json(await stub.snapshotRecord(value.epoch, value.table, value.key));
+      if (path === '/snapshotHeader') return Response.json(await stub.snapshotHeader(value.epoch, value.base, value.chain));
+      if (path === '/snapshotPage') return Response.json(await stub.snapshotPage(value.epoch, value.after));
+      if (path === '/snapshotRecord') return Response.json(await stub.snapshotRecord(value.epoch, value.position));
       if (path === '/restoreStatus') return Response.json(await stub.restoreStatus());
-      if (path === '/restoreBegin') return Response.json(await stub.restoreBegin(value.header, value.footer));
+      if (path === '/restoreBegin') return Response.json(await stub.restoreBegin(value.header, value.footer, value.target));
       if (path === '/restoreRecord') return Response.json(await stub.restoreRecord(value.index, value.line));
       if (path === '/restoreFinish') return Response.json(await stub.restoreFinish());
       return Response.json(await stub.testCommand(path.slice(1), value));

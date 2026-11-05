@@ -8,7 +8,7 @@ and receipt-based append continuation. `npm run demo:core` runs its offline
 signature rehearsal; `npm run seed:core` shows a small candidate public planting.
 Both need only Node 24 and upload nothing. The [native SQLite/R2 acceptance layer](core/host/README.md)
 now has fault and restart tests (`npm run test:acceptance`, requiring workerd).
-Whole-core backup/restore is available: `npm run demo:recovery` runs a local loss
+Full and incremental whole-core backup/restore are available: `npm run demo:recovery` runs a local loss
 drill, and [the recovery guide](core/RECOVERY.md) explains the safety boundaries.
 The [native HTTP service and explorer](core/HTTP.md) now run with `npm run dev:core`
 (or `npm run dev:core -- --operator` for local read-only table inspection). Open

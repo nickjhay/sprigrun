@@ -1,9 +1,9 @@
 import { full, type BucketState } from '../../shared/bucket.ts';
-import { check } from '../src/bytes.ts';
+import { check, nextU64, orderedU64 } from '../src/bytes.ts';
 import type { Policy } from './policy.ts';
 
 export type Control = {
-  schema: 3; origin: string; epoch: string; paused: boolean;
+  schema: 4; origin: string; journal: string; position: string; epoch: string; paused: boolean;
   growth: BucketState; burst: BucketState; attempts: BucketState;
   moderation: string; accepted: string; reservedBytes: string; acceptedDebit: string;
 };
@@ -18,6 +18,8 @@ export interface Result extends Record<string, SqlStorageValue> {
   header: string; body: string | null; source: string | null; signature: string | null;
   key_record: string | null; author_binding: string | null; receipt: string;
 }
+export type ChangeKind = 'sources' | 'results' | 'moderation' | 'cuts' | 'pause';
+export interface ChangeIndex extends Record<string, SqlStorageValue> { position: string; kind: ChangeKind; key: string }
 export class State {
   readonly sql: SqlStorage;
   constructor(sql: SqlStorage, origin: string, p: Policy, now: number) {
@@ -25,7 +27,7 @@ export class State {
     // Refuse old state before any schema mutation; the operator chooses a fresh directory.
     if (sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='control'").toArray().length) {
       const c = this.control();
-      check(c.schema === 3 && c.origin === origin, 'incompatible_native_database');
+      check(c.schema === 4 && c.origin === origin, 'incompatible_native_database');
     }
     sql.exec(`CREATE TABLE IF NOT EXISTS control (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sources (
@@ -43,13 +45,22 @@ export class State {
         position TEXT PRIMARY KEY, effect TEXT NOT NULL, path TEXT NOT NULL,
         active INTEGER NOT NULL, epoch TEXT NOT NULL, at_ms TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS moderation_target ON moderation(effect, path, position DESC);
-      CREATE TABLE IF NOT EXISTS cuts (epoch TEXT PRIMARY KEY, control TEXT NOT NULL, at_ms TEXT NOT NULL);`);
-    const initial: Control = { schema: 3, origin, epoch: '0', paused: false,
+      CREATE TABLE IF NOT EXISTS cuts (epoch TEXT PRIMARY KEY, control TEXT NOT NULL, at_ms TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS journal (position TEXT PRIMARY KEY, kind TEXT NOT NULL, key TEXT NOT NULL);
+      CREATE UNIQUE INDEX IF NOT EXISTS journal_fact ON journal(kind, key) WHERE kind != 'pause';`);
+    const initial: Control = { schema: 4, origin, journal: crypto.randomUUID().replaceAll('-', ''), position: '0', epoch: '0', paused: false,
       growth: full(p.growth, now), burst: full(p.burst, now), attempts: full(p.attempts, now),
       moderation: '0', accepted: '0', reservedBytes: '0', acceptedDebit: '0' };
     sql.exec('INSERT OR IGNORE INTO control VALUES (1, ?)', JSON.stringify(initial));
     const c = this.control();
-    check(c.schema === 3 && c.origin === origin, 'incompatible_native_database');
+    check(c.schema === 4 && c.origin === origin, 'incompatible_native_database');
+  }
+  /** Call in the same transaction as the fact and save(c); no payload duplication. */
+  record(c: Control, kind: ChangeKind, key: string): string {
+    c.position = nextU64(c.position);
+    const position = orderedU64(c.position);
+    this.sql.exec('INSERT INTO journal VALUES (?, ?, ?)', position, kind, key);
+    return position;
   }
   control(): Control { return JSON.parse(this.sql.exec<{ value: string }>('SELECT value FROM control WHERE id=1').one().value); }
   save(c: Control) { this.sql.exec('UPDATE control SET value=? WHERE id=1', JSON.stringify(c)); }

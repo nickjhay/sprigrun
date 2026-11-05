@@ -39,10 +39,19 @@ class Costs(unittest.TestCase):
     def test_independent_custody_cost_is_explicit(self):
         a = estimate(); b = estimate(Scenario(backup_gb_price=.02))
         self.assertAlmostEqual(b['total_usd'] - a['total_usd'], b['archive_gb_end'] * 4 * .02)
+    def test_incremental_copies_old_bodies_only_in_full_backups(self):
+        full = estimate(Scenario(years=1, backup_every_days=1))
+        delta = estimate(Scenario(years=1, incremental_every_days=1/24))
+        self.assertEqual(delta['incremental_copies_this_month'], 720)
+        self.assertLess(delta['backup_source_gets'], full['backup_source_gets'])
+        self.assertAlmostEqual(delta['backup_source_gets'],
+            estimate(Scenario(years=1))['backup_source_gets'] + delta['new_sources'])
+        self.assertEqual(delta['new_sources'], full['new_sources'])
+        self.assertGreater(delta['retained_archive_gb_estimate'], delta['archive_gb_end'] * 4)
     def test_invalid_inputs(self):
         for s in [Scenario(source_share=2), Scenario(cpu_ms=math.nan), Scenario(reads=-1),
                   Scenario(backup_every_days=0), Scenario(metadata_batch=33), Scenario(source_kib=257),
-                  Scenario(chat_kib=9), Scenario(saved_credit_mib=201)]:
+                  Scenario(chat_kib=9), Scenario(saved_credit_mib=201), Scenario(incremental_every_days=8)]:
             with self.subTest(s=s), self.assertRaises(ValueError): estimate(s)
 
 if __name__ == '__main__': unittest.main()

@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { probe, origin, backupToken } from './probe.mjs';
 import { capture, checkBackup, main } from '../scripts/backup.mjs';
-import { backup, restore, verify } from '../scripts/recover.mjs';
+import { backup, restore, restoreChain, verify } from '../scripts/recover.mjs';
 import { startNative } from '../scripts/local-http.mjs';
 import { nativeClient } from '../scripts/http-client.mjs';
 import { textBytes } from '../src/bytes.ts';
@@ -53,7 +53,7 @@ test('batched and individual export produce identical archives, even with later 
   assert.deepEqual(await readFile(h.archive), await readFile(second));
   assert.equal((await h.measure()).gets - before.gets, 2);
   assert.ok(BigInt(saved.footer.count) > 40n);
-  await assert.rejects(h.backup.snapshotBatch(epoch, 'sources', ''), /snapshot_sources_individual/);
+  await assert.rejects(h.backup.snapshotBatch(epoch, 'bad_cursor'), /invalid_u64/);
 });
 test('batch byte bound makes progress with large records', async t => {
   const h = await fixture(t, { policy: { chatBytes: 256 * 1024 } });
@@ -62,13 +62,13 @@ test('batch byte bound makes progress with large records', async t => {
   // Control characters expand in canonical archive JSON; a single valid record may exceed 512 KiB.
   for (let i = 0; i < 3; i++) await h.client.publish('/chat' + pub.result, textBytes(i + '\0'.repeat(90000)));
   const epoch = await h.backup.cut(), seen = [];
-  let after = '';
+  let after = '0';
   for (let pages = 0; ; pages++) {
     assert.ok(pages < 10);
-    const page = await h.backup.snapshotBatch(epoch, 'results', after);
-    seen.push(...page.records.map(line => JSON.parse(line).row.action));
+    const page = await h.backup.snapshotBatch(epoch, after);
+    seen.push(...page.records.map(JSON.parse).filter(r => r.type === 'results').map(r => r.row.action));
     if (page.done) break;
-    assert.ok(page.after > after); after = page.after;
+    assert.ok(BigInt(page.after) > BigInt(after)); after = page.after;
   }
   assert.equal(seen.length, 5); assert.equal(new Set(seen).size, 5);
   await backup(h.backup, h.archive, epoch);
@@ -106,4 +106,27 @@ test('bounded local rehearsal preserves retry and admission invariants', async (
   const result = await rehearse(8);
   assert.equal(result.samples.length, 6);
   assert.equal(result.throttles.writes[429], 10);
+});
+
+
+test('backup runner witnesses a delta and authenticated recovery requires the complete trusted chain', async t => {
+  const h = await fixture(t), env = { SPRIG_BACKUP_TOKEN: backupToken };
+  await h.client.publish('/sea', textBytes('An older fern.'));
+  const base = await capture(h.backup, h.archive, h.witness);
+  const value = await h.client.publish('/sea', textBytes('A fern between backups.'));
+  const delta = join(h.dir, 'delta.jsonl'), witness = join(h.dir, 'witness', 'delta.json');
+  const before = await h.measure();
+  const saved = await main(['capture', origin, delta, '--witness', witness, '--base', h.archive, '--base-witness', h.witness],
+    { env, fetcher: h.fetcher, out() {}, progress() {} });
+  assert.equal((await h.measure()).gets - before.gets, 1); // No re-read of the older source.
+  assert.equal(saved.base, base.chain); assert.equal(saved.from, base.through);
+  assert.equal((await checkBackup(delta, witness)).chain, saved.chain);
+  const target = await startNative({ port: 0, origin, restoring: true, policy: (await verify(delta)).header.policy, adminToken: 'd'.repeat(64) });
+  t.after(() => target.close());
+  const c = nativeClient(origin, { token: 'd'.repeat(64), fetcher: (...args) => target.mf.dispatchFetch(...args) });
+  assert.equal((await restore(c, h.archive, base.chain, saved.chain)).phase, 'awaiting_delta');
+  await assert.rejects(c.restoreRelease(saved.chain, 'history-reconciled'), /restore_not_complete/);
+  assert.equal((await restoreChain(c, [h.archive, delta], saved.chain)).phase, 'restored');
+  const results = (await c.inspect('results')).rows;
+  assert.ok(results.some(r => r.path === value.result));
 });

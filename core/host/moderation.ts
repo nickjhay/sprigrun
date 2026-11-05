@@ -67,6 +67,7 @@ export class Moderation {
       this.db.sql.exec('INSERT INTO moderation VALUES (?, ?, ?, ?, ?, ?)',
         change.position, change.effect, change.path, change.active, change.epoch, change.at_ms);
       c.moderation = String(BigInt(change.position));
+      this.db.record(c, 'moderation', change.position);
     }
     if (c.moderation !== before) this.db.save(c);
   }

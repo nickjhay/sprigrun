@@ -42,7 +42,8 @@ class Scenario:
     source_read_share: float = .5  # Others read SQL/listings; HTML is generated, not free ASSETS.
     signed_chat_share: float = .5  # One R2 key-record GET per signed action in current code.
     cpu_ms: float = 3  # Assumed Worker CPU per request. NOT local elapsed latency.
-    backup_every_days: float = 7  # Full copies; >0, no incremental archive yet.
+    backup_every_days: float = 7  # Full copies; >0.
+    incremental_every_days: float = 0  # 0 disables; otherwise <= full interval.
     metadata_batch: float = 16  # Effective records/request; API max32, byte cap can reduce it.
     backup_copies: float = 4
     backup_gb_price: float = 0  # Set to independent storage provider's price; 0 means excluded.
@@ -58,6 +59,8 @@ def estimate(s: Scenario = Scenario(), prices: Prices = Prices()) -> dict:
         raise ValueError('representative sizes must fit phase-0 source/chat limits')
     if s.backup_every_days <= 0 or not 1 <= s.metadata_batch <= 32:
         raise ValueError('backup interval must be positive and effective batch must be 1..32')
+    if s.incremental_every_days > s.backup_every_days:
+        raise ValueError('incremental interval must not exceed full interval')
     if s.saved_credit_mib > 200: raise ValueError('saved credit is capped at 200 MiB')
     size, chat = s.source_kib * KIB, s.chat_kib * KIB
     source_debit, chat_debit = max(size, 8192) + 8192, 8192 + chat
@@ -79,27 +82,38 @@ def estimate(s: Scenario = Scenario(), prices: Prices = Prices()) -> dict:
     # End-of-month inventory for every export deliberately overestimates this month's backup traffic.
     nsource, nchat = (history + month) * source_rate, (history + month) * chat_rate
     copies = math.ceil(30 / s.backup_every_days)
-    cuts = math.ceil((365 * s.years + 30) / s.backup_every_days)
-    # Source paging + one verified R2 GET/record. Metadata is batched, not one GET/row.
-    export_requests = (nsource + math.floor(nsource / 32) + 1
-        + math.floor((nsource + nchat) / s.metadata_batch) + 1
-        + math.floor(cuts / s.metadata_batch) + 1 + 3)  # header, cut, empty moderation page
-    backups = copies * export_requests
+    deltas = math.ceil(30 / s.incremental_every_days) if s.incremental_every_days else 0
+    cut_rate = 1 / s.backup_every_days + (1 / s.incremental_every_days if deltas else 0)
+    cuts = math.ceil((365 * s.years + 30) * cut_rate)
+    # Conservative: count deltas even at full-copy boundaries, and one request per
+    # source body although small bodies can share a batch. Other journal facts batch.
+    def export_requests(ns, nc, nk):
+        return math.ceil(ns) + math.ceil((ns + nc + nk) / s.metadata_batch) + 2
+    window = min(30, s.incremental_every_days)
+    delta_sources, delta_chats = sources * window / 30, chats * window / 30
+    delta_cuts = math.ceil(window * cut_rate)
+    backups = copies * export_requests(nsource, nchat, cuts) + deltas * export_requests(delta_sources, delta_chats, delta_cuts)
+    backup_sources = copies * nsource + deltas * delta_sources
+    backup_records = copies * (2 * nsource + nchat + cuts) + deltas * (2 * delta_sources + delta_chats + delta_cuts)
     requests = s.reads + sources + chats + backups
     usage = Usage(worker_requests=requests + s.extra_worker_requests,
         worker_cpu_ms=(requests + s.extra_worker_requests) * s.cpu_ms,
         do_requests=requests + s.extra_do_requests,
         do_gb_seconds=.128 * 30 * 86400,  # one always-active DO; includes IO wait
         r2_a=sources,
-        r2_b=s.reads * s.source_read_share + chats * s.signed_chat_share + copies * nsource,
+        r2_b=s.reads * s.source_read_share + chats * s.signed_chat_share + backup_sources,
         r2_gb_months=stored_sources * size / GB,
         sql_gb_months=(average * sql_per_charge + cuts * 4096) / GB,
         # Estimated row operations including indexes; backup scans proportional to records.
-        sql_rows_read=(s.reads + sources + chats + s.extra_do_requests) * 32 + copies * (2 * nsource + nchat + cuts) * 8,
-        sql_rows_written=(sources + chats + s.extra_do_requests) * 16 + copies * 4)
+        sql_rows_read=(s.reads + sources + chats + s.extra_do_requests) * 32 + backup_records * 8,
+        sql_rows_written=sources * 22 + chats * 19 + s.extra_do_requests * 16 + (copies + deltas) * 7)
     costs = bill(usage, prices)
     archive_bytes = nsource * (size + 2048) + nchat * (2048 + chat) + cuts * 4096
-    costs['Independent backup storage (estimate; zero means excluded)'] = archive_bytes / GB * s.backup_copies * s.backup_gb_price
+    # Retain each full copy plus a full interval's growth as its delta chain.
+    suffix_bytes = ((sources * (size + 2048) + chats * (2048 + chat)) * s.backup_every_days / 30
+                    + math.ceil(s.backup_every_days * cut_rate) * 4096) if deltas else 0
+    retained_archive_bytes = (archive_bytes + suffix_bytes) * s.backup_copies
+    costs['Independent backup storage (estimate; zero means excluded)'] = retained_archive_bytes / GB * s.backup_gb_price
     capacity_days = SQL_LIMIT / (daily * sql_per_charge) if daily * sql_per_charge else None
     warnings = []
     if sql_end + cuts * 4096 >= SQL_LIMIT:
@@ -109,6 +123,8 @@ def estimate(s: Scenario = Scenario(), prices: Prices = Prices()) -> dict:
     if s.backup_gb_price == 0: warnings.append('Independent backup storage/transfer fees are excluded.')
     return {'scenario': asdict(s), 'charged_mib_per_day': daily / MIB, 'new_sources': sources,
         'new_chats': chats, 'backup_http_requests': backups, 'backup_copies_this_month': copies,
+        'incremental_copies_this_month': deltas, 'backup_source_gets': backup_sources,
+        'retained_archive_gb_estimate': retained_archive_bytes / GB,
         'archive_gb_end': archive_bytes / GB, 'sql_gb_end': (sql_end + cuts * 4096) / GB,
         'sql_capacity_days_from_empty_estimate': capacity_days, 'usage': asdict(usage),
         'costs_usd': costs, 'total_usd': sum(costs.values()), 'warnings': warnings}

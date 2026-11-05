@@ -37,7 +37,7 @@ transaction writes:
 - the unique action ID and original signature/evidence;
 - one result row, plus the next collection number and head for an append;
 - the acceptance timestamp and snapshot epoch;
-- the metadata growth debit and receipt;
+- the metadata growth debit, receipt and recovery journal pointer;
 - first publication of a prepared source, when applicable.
 
 There is no await, crypto, R2 operation or scan of prior history inside that
@@ -131,9 +131,11 @@ the cut. There is no claim about a particular production latency yet.
 
 Committed results, moderation changes and cuts retain their epochs. Sources
 retain only preparation facts; the result row supplies the publication epoch/time.
-The exporter joins them at the cut and copies exact bytes, action evidence, timestamps,
-quota control and consumption identities. The restore target validates the archive
-and rebuilds heads while quarantined; imports and bounded verification resume durably. Original
+Full and incremental exports follow the same bounded journal stream. Exact source
+bytes accompany acceptance; preparations carry no body. The restore target checks
+each result and its already imported predecessors, then rebuilds heads while
+quarantined. Fact, journal pointer and resume cursor commit together. A missing
+suffix cannot release a restore plan pinned to a later digest. Original
 credits remain historical, while spendable credits reset to zero. See the
 [recovery guide](../RECOVERY.md) for the format, loss drill and release boundary.
 Physical deletion and pin release are not implemented. Do not use the old

@@ -155,19 +155,19 @@ async function operatorRoute(request: Request, env: Env, core: NativeCoordinator
         }
         if (path.startsWith('/admin/snapshot/')) {
             const method = path.slice('/admin/snapshot/'.length);
-            const names = method === 'header' ? ['epoch'] : (method === 'page' || method === 'batch') ? ['epoch', 'table', 'after'] : method === 'record' ? ['epoch', 'table', 'key'] : null;
+            const names = method === 'header' ? ['epoch', 'base', 'chain'] : (method === 'page' || method === 'batch') ? ['epoch', 'after'] : method === 'record' ? ['epoch', 'position'] : null;
             if (!names)
                 throw new HttpError(404, 'not_found');
             query(url, names);
             const epoch = p.get('epoch') ?? '';
             u64(epoch);
             if (method === 'header')
-                return text(core.snapshotHeader(epoch));
+                return text(core.snapshotHeader(epoch, p.get('base'), p.get('chain')));
             if (method === 'batch')
-                return json(await core.snapshotBatch(epoch, p.get('table') ?? '', p.get('after') ?? ''));
+                return json(await core.snapshotBatch(epoch, p.get('after') ?? '0'));
             if (method === 'page')
-                return json(core.snapshotPage(epoch, p.get('table') ?? '', p.get('after') ?? ''));
-            return text(await core.snapshotRecord(epoch, p.get('table') ?? '', p.get('key') ?? ''));
+                return json(core.snapshotPage(epoch, p.get('after') ?? '0'));
+            return text(await core.snapshotRecord(epoch, p.get('position') ?? ''));
         }
     }
     if (request.method !== 'POST')
@@ -209,8 +209,8 @@ async function operatorRoute(request: Request, env: Env, core: NativeCoordinator
         return json({ key: value.key, blocked: value.blocked });
     }
     if (path === '/admin/restore/begin') {
-        fields(value, ['header', 'footer']);
-        return json(await core.restoreBegin(value.header, value.footer));
+        fields(value, ['header', 'footer', 'target']);
+        return json(await core.restoreBegin(value.header, value.footer, value.target));
     }
     fields(value, ['chain', 'confirmation']);
     return json(await core.restoreRelease(value.chain, value.confirmation));

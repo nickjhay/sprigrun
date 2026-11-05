@@ -1,6 +1,6 @@
 # Operating the native core
 
-3 November 2026. Local rehearsal and operator tooling; **nothing deployed or
+4 November 2026. Local rehearsal and operator tooling; **nothing deployed or
 scheduled**. Production remains gated on backup custody, reconciliation,
 report handling, seed keys and a deployed-preview check.
 
@@ -28,7 +28,8 @@ npm run backup:core -- check /backups/sprig/2026-11-03.jsonl \
 ```
 
 Both files are created exclusively, mode 0600, synced and never overwritten.
-The witness pins origin, epoch, chain digest and record count. Keep its trusted
+The version-2 witness pins origin, journal identity, epoch, starting/ending
+positions, predecessor digest, final digest and record count. Keep its trusted
 copy under different credentials/custody from the archive and primary service.
 Different directories are required to discourage accidental bundling; **they do
 not establish independent custody**. No signature from the runner or host is
@@ -45,16 +46,29 @@ A `.partial` file left by a killed process is not a completed archive.
 Set a scheduler on the independent runner, use unique paths per attempt, prevent
 overlapping jobs and alert on failures/missing witnesses. Do not auto-delete old
 copies yet. Choose retention and monitor physical capacity before scheduling.
-Weekly full copies are a starting cost scenario, not a recommended recovery-point
-objective: they can leave nearly a week of unreconciled accepted history. Daily
-copies shorten that window but cost more. A trusted incremental journal/replica
-is a separate future improvement. R2 itself plus SQL point-in-time recovery is
-not a coherent independent backup of both systems.
+Weekly full copies are a cost scenario, not a recommended recovery-point
+objective. Incremental copies shorten the gap without copying every old source:
+
+```sh
+npm run backup:core -- capture https://sprig.run /backups/sprig/delta-1.jsonl \
+  --witness /witnesses/sprig/delta-1.json \
+  --base /backups/sprig/2026-11-03.jsonl --base-witness /witnesses/sprig/2026-11-03.json
+
+# Next time, use delta-1 and its witness as the base; keep the entire chain.
+```
+
+The base file and independently trusted witness are checked before creating a
+cut. Each increment binds the exact preceding cut and digest, including its
+journal identity. Retain the full snapshot and every link, not merely the newest
+delta. Plan periodic full copies: recovery preflight accepts at most 1,024 files.
+An hourly interval with weekly full copies stays well within that bound. A failed
+or missing scheduled copy must alert; this code installs no scheduler or replica.
+R2 plus SQL point-in-time recovery alone is not a coherent independent backup.
 
 The exporter streams a closed epoch while new submissions continue in the next.
-Metadata responses examine at most 32 rows, with a soft 512 KiB encoded-response
-budget; one valid oversized record is allowed. Source records remain individual
-verified R2 reads. The client bounds each complete HTTP response and times out
+Responses examine at most 32 ordered journal records, with a soft 512 KiB encoded-response
+budget; one valid oversized record is allowed. Each included source body needs one verified R2 read; a delta includes only
+newly accepted sources. Later history cannot lengthen the closed-prefix scan. The client bounds each complete HTTP response and times out
 fetch/body reading after 30 seconds. Redirects are refused, so credentials do not
 follow them. Export format and digest are identical with or without batching.
 
@@ -79,26 +93,30 @@ profile retains the production 30-attempt and 120-read burst capacities, with
 negligible refill for reproducibility. Existing HTTP tests cover eight concurrent
 uploads and stalled-body deadlines. This is **not a production throughput test**.
 
-Measured on Linux/Node 24.22.1 with schema 2 (4 November 2026),
+Measured on Linux/Node 24.22.1 with schema 4 (4 November 2026),
 128 accepted actions per case:
 
 | Action | SQLite bytes/action | R2 PUT/action | R2 GET/action |
 | --- | ---: | ---: | ---: |
-| New 32 KiB source | 1,120 | 1 | 0 |
+| New 32 KiB source | 1,632 | 1 | 0 |
 | Exact source retry | 0 | 0 | 0 |
-| Anonymous 1 KiB chat | 2,240 | 0 | 0 |
-| Signed 1 KiB chat, plot author | 2,208 | 0 | 1 |
-| Short publication reference | 896 | 0 | 0 |
-| Long publication path | 3,328 | 0 | 0 |
+| Anonymous 1 KiB chat | 2,400 | 0 | 0 |
+| Signed 1 KiB chat, plot author | 2,368 | 0 | 1 |
+| Short publication reference | 1,024 | 0 | 0 |
+| Long publication path | 3,936 | 0 | 0 |
 
 These are page-allocation deltas in a small local sample, not per-row billing or
 worst-case bounds. Path length, message size, insertion order, page utilization,
 keys, signatures and future schema changes matter. The long path uses seven
 32-character topic components plus the final topic. The cost model leaves SQL
 allocation estimates editable and defaults above the short-path observations.
-Compared with schema 1, the paired entry/acceptance rows and index were replaced
-by one result row. The model counts one inline message body and one result
-metadata stream per backup; JSON escaping and page overhead remain estimates.
+Against the earlier schema-2 sample, this is about 512 extra bytes/source,
+160 bytes/chat and 128 bytes/short publication. The added journal stores pointers,
+not duplicate payloads. These are observations across samples, not fixed overhead
+bounds or provider row-operation measurements. The editable model's 2 KiB source
+metadata and 2 KiB chat overhead defaults still exceed the short-path samples.
+The archive copies each source body once per full backup, and once when it first
+appears in an increment. JSON escaping can still enlarge the file estimate.
 The rehearsal also saw exactly 30 accepted/10 refused POSTs and 120 accepted/20
 refused listing reads; those reads added no SQL pages or R2 operations. Retry
 POSTs still consume attempt credit and request/CPU cost.
@@ -118,6 +136,7 @@ Python 3, no dependencies or Cloudflare runtime:
 python3 core/costs.py
 python3 core/costs.py --source-share 1 --years 0 1 3
 python3 core/costs.py --backup-every-days 1 --years 0 .5
+python3 core/costs.py --incremental-every-days 0.041666667 --years 0 .5
 python3 core/costs.py --daily-mib 25 --reads 1000000 --json
 python3 core/costs.py --extra-worker-requests 100000000 --extra-do-requests 100000000
 ```
@@ -132,8 +151,10 @@ of chat signed, 3 ms assumed Worker CPU/request, one always-active DO, weekly fu
 exports (conservatively five per month), effective metadata batches of 16, all
 account allowances available. No deletion, deduplication or failed reservation
 backlog; historical workload is the same as the modeled month. Saved burst credit
-can be added once, at most 200 MiB, not compounded annually. Export estimates use
-end-of-month inventory for every copy. Source reads, signature key lookups and
+can be added once, at most 200 MiB, not compounded annually. Full export estimates use end-of-month inventory for every copy. Optional
+increments use their interval's new growth; the model conservatively counts them
+even on full-copy boundaries. Request counts allow one request per source body
+plus batched pointer/inline records, although small bodies can share a batch. Source reads, signature key lookups and
 full-backup source reads all contribute to R2 Class B operations.
 
 | Service age at month's start | USD/month | Journal GB at month's end |
@@ -146,17 +167,21 @@ Costs beyond the capacity limit are hypothetical until partitioned. An all-sourc
 scenario is about $6.53/month after one year with 2.07 GB of journal. An all-chat
 scenario reaches about 7.43 GB by the end of the month starting at half a year.
 At half a year, daily full exports raise the default estimate from $5.75 to about
-$8.68/month, before independent storage fees. The payload budget alone does not
-capture the cost of repeatedly copying an ever-growing journal.
+$8.59/month, before independent storage fees. Weekly full copies plus hourly increments are about $5.75/month at that age,
+with about 1.40 million backup source GETs versus 8.16 million for daily full
+copies. These figures reuse the 3 November price assumptions below and exclude
+independent custody. The payload budget alone does not capture repeated copying
+of an ever-growing journal.
 
 Independent storage/transfer, taxes, domains, frontend, WAF, logs and restores are
 excluded by default. `--backup-gb-price` and `--backup-copies` add a rough retained
-archive-storage allowance; provider transfer/minimum charges need separate care.
+archive-storage allowance (each retained full copy plus an interval of deltas);
+provider transfer/minimum charges need separate care.
 Archive size is an estimate (JSON escaping can enlarge text). SQL allocation and
 row operations are estimates; moderation history, large name trees and reserved-source
 backlog need additional scenarios. Effective batch size depends on record sizes;
-`--metadata-batch 1` is a conservative small-batch comparison. Growing post-cut
-history can require extra empty filtered pages during export.
+`--metadata-batch 1` is a conservative small-batch comparison. The journal-position bound excludes post-cut
+history without scanning it.
 
 A quota is not a dollar cap. Public requests rejected by our Worker/DO can still
 be billed; the volatile read limiter can reset when the DO restarts. Configure
@@ -172,9 +197,8 @@ Official references, checked 3 November 2026:
 - [SQLite storage API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
 
 
-The allocation samples above were taken on schema 2. Schema 3 adds an indexed
-operator policy history and one control count; it still writes no policy data
-for ordinary views or publications, and adds no R2 operations to source POSTs.
-New signed admissions perform indexed author-block checks. Policy changes are
-operator-only and have their own stored history; model their volume separately
-from public content growth. The fixed per-action allowance is not a provider bill.
+Policy changes and pause/cut operations have their own small journal entries.
+They do not add R2 operations to source POSTs. New signed admissions perform
+indexed author-block checks. Model unusually frequent operator policy changes
+separately from public growth; cuts at the selected backup intervals are included.
+The fixed per-action allowance is not a provider bill.
