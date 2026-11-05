@@ -111,9 +111,10 @@ and physical integrity: a listing is not proof that R2 bytes are still present.
 
 Suppression gates raw records, HTML, directories, actions, receipts and signature
 evidence. A suppressed source hides dependent publications and chats. A suppressed
-key hides retained evidence containing it and prevents new use, while already
-accepted authored messages remain public under the existing policy. Latest never
-rewinds. Conditional reads and HEAD still pass visibility/integrity checks.
+key hides retained evidence containing it; preventing new signatures requires the
+separate author block. Already accepted authored messages remain public under the
+existing policy. Latest never rewinds. Conditional reads and HEAD still pass
+visibility/integrity checks.
 
 Raw records use `private, max-age=300, immutable` and an exact-byte ETag. Browsers
 may keep a copy for five minutes; suppression cannot retract a downloaded copy.

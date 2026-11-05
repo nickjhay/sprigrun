@@ -4,7 +4,7 @@ import { randomBytes, generateKeyPairSync } from 'node:crypto';
 import { resolve, join } from 'node:path';
 import { startNative } from './local-http.mjs';
 import { nativeClient } from './http-client.mjs';
-import { plantLocal } from './plant-local.mjs';
+import { plant } from './plant.mjs';
 let port = 8789, directory = resolve('.local/native-http'), operator = false, seed = true;
 const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i++) {
@@ -56,8 +56,8 @@ try {
                 throw e;
         }
         if (!planted) {
-            const pem = await keep('development-key.pem', () => generateKeyPairSync('ed25519').privateKey.export({ format: 'pem', type: 'pkcs8' }));
-            planted = await plantLocal(nativeClient(host.origin), pem);
+            await keep('development-key.pem', () => generateKeyPairSync('ed25519').privateKey.export({ format: 'pem', type: 'pkcs8' }));
+            planted = await plant(nativeClient(host.origin), { directory, keyFile: join(directory, 'development-key.pem') });
             await writeFile(join(directory, 'planting.json.tmp'), JSON.stringify(planted, null, 2) + '\n', { mode: 0o600 });
             await rename(join(directory, 'planting.json.tmp'), join(directory, 'planting.json'));
         }

@@ -1,0 +1,92 @@
+// Intended deployment configuration; run preflight and the account checks in README.md first.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "sprigrun-core-staging",
+  "main": "../http/worker.ts",
+  "compatibility_date": "2026-10-26",
+  "workers_dev": false,
+  "preview_urls": false,
+  "secrets": { "required": ["ADMIN_TOKEN", "BACKUP_TOKEN"] },
+  "routes": [
+    {
+      "pattern": "staging.sprig.run",
+      "custom_domain": true
+    }
+  ],
+  "limits": {
+    "cpu_ms": 100
+  },
+  "r2_buckets": [
+    {
+      "binding": "SOURCES",
+      "bucket_name": "sprigrun-sources-staging"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CORE",
+        "class_name": "NativeCoordinator"
+      }
+    ]
+  },
+  "exports": {
+    "NativeCoordinator": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "ratelimits": [
+    {
+      "name": "WRITE_RATE_LIMITER",
+      "namespace_id": "2101",
+      "simple": {
+        "limit": 20,
+        "period": 60
+      }
+    },
+    {
+      "name": "READ_RATE_LIMITER",
+      "namespace_id": "2102",
+      "simple": {
+        "limit": 120,
+        "period": 60
+      }
+    }
+  ],
+  "vars": {
+    "CORE_ORIGIN": "https://staging.sprig.run",
+    "ABUSE_EMAIL": "abuse@sprig.run",
+    "CORE_CAPACITY_BYTES": 800000000,
+    "CORE_POLICY": {
+      "sourceBytes": 262144,
+      "chatBytes": 8192,
+      "minimumDebit": 8192,
+      "growth": {
+        "capacity": 209715200,
+        "refill": 104857600,
+        "periodMs": 86400000
+      },
+      "burst": {
+        "capacity": 8388608,
+        "refill": 8388608,
+        "periodMs": 3600000
+      },
+      "attempts": {
+        "capacity": 30,
+        "refill": 30,
+        "periodMs": 60000
+      }
+    },
+    "CORE_HTTP_POLICY": {
+      "uploadTimeoutMs": 10000,
+      "readCapacity": 120,
+      "readRefill": 120,
+      "readPeriodMs": 60000,
+      "readConcurrency": 8
+    }
+  },
+  "observability": {
+    "enabled": false
+  }
+}

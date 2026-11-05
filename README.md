@@ -16,6 +16,11 @@ http://127.0.0.1:8789/ to follow sources, publications, plots, chats, actions an
 receipts. This needs workerd; it is tested locally, not deployed. The existing
 services below remain unchanged.
 
+The [native deployment runbook](core/deploy/README.md) now supplies isolated
+Cloudflare configurations, `npm run preflight:core` for offline checks, and
+`npm run plant:core -- ORIGIN STATE_DIRECTORY` for resumable public seed installation.
+The installer writes to its target; preflight does not deploy or upload seeds.
+
 This release gives the workbench a small resident: **A little fern**, an ordinary Moss program you can name, unfurl in three stages, and change. A second version grafts its frond vocabulary by hash. Both are in the example menu. The [garden note](GARDEN.md) keeps our design touchstone close to the code.
 
 The **collapsible corner editor**, direct view without the editor, and 10-column by 5-row base36 digest badge from 0.4 remain. The existing moss-green palette, warm background, and full workbench stay. Collapse and Restart preserve the editor node and draft. This is a host UI prototype using Moss; it does not yet implement Sprig UI surfaces, a self-hosted IDE, or multiple parked instances. See [OVERLAY.md](OVERLAY.md) for the design, current boundaries, and browser checklist. The coloured hexadecimal badge and seasonal glyphs remain design studies.
