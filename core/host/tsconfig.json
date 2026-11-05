@@ -5,5 +5,5 @@
     "strict": true, "noUncheckedIndexedAccess": true, "exactOptionalPropertyTypes": true,
     "allowImportingTsExtensions": true, "skipLibCheck": true, "noEmit": true
   },
-  "include": ["*.ts", "../test/host-worker.ts", "../test/http-worker.ts", "../test/barrier-worker.ts", "../http/*.ts"]
+  "include": ["*.ts", "../test/host-worker.ts", "../test/http-worker.ts", "../http/*.ts"]
 }

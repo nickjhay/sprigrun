@@ -1,41 +1,36 @@
 # One recovery stream
 
-Implementation slice C; one physical coordinator. Public results and signatures
-do not gain a global ordering promise.
+One authoritative metadata database and private immutable R2 bodies. The
+`journal` is a small index of all reconstruction facts: source reservations,
+accepted results, moderation decisions and pause transitions. Each fact, pointer
+and monotonic u64 position commits in the same SQLite transaction. The result
+already contains its receipt and evidence; the index never duplicates payloads.
 
-The journal holds a monotonic u64 position and a pointer to each immutable source
-reservation, accepted result, applied moderation fact or cut. Pause/unpause is a
-small inline control fact. The fact, pointer and position commit together. A
-rejected attempt, exact retry or GET creates no journal entry. Attempt credit is
-mutable operating state: restoration always resets all spendable credit to zero,
-so omitting its individual decrements cannot resurrect credit. Cuts retain the
-historical bucket values, policy, counters and pause state.
+A read-only checkpoint captures control, policy and position P and waits for
+storage durability. It adds no row or epoch and pauses no commits. Export pages
+stay within that journal's `position <= P`. Immutability makes copying those rows
+and their accepted R2 bodies later safe while new writes continue. Reservations
+need no unpublished body. Exact retries, GETs and rejected admissions create no
+journal fact; spendable quota credits reset to zero on recovery.
 
-Full and incremental archives share one stream format. A full archive starts at
-position zero. A delta starts after a previously witnessed cut and binds that
-cut, journal identity and the previous archive's digest. Both stop at a closed
-cut. Export is bounded by rows and bytes; source bytes accompany their first
-accepted result, never an unpublished reservation. The live journal never copies
-payloads and adds no R2 operation to ordinary publication.
+Full and incremental copies use the same bounded stream. A full copy starts at
+zero; an increment starts after the exact previous checkpoint and binds its
+archive digest. The header holds the small control snapshot and the footer
+checks replayed accounting. Empty copies are valid. No stored cuts, backup pins
+or coordinator-wide barrier state are needed while historical data is retained.
 
-Restore validates one bounded record at a time in journal order. Required local
-predecessors must already exist. It inserts the fact and journal pointer with the
-durable import cursor; a lost acknowledgement can repeat only the identical last
-record. Cuts check counters and replayed control state. A full snapshot and every
-delta use the same validation and import path.
+Restore into empty storage under persistent quarantine. Validate each bounded
+record, its signature/receipt and prior dependencies; commit it with its resume
+cursor. Pin the final trusted digest before import. Missing links, changed files,
+gaps and conflicting retries cannot complete the plan. Release additionally
+requires explicit history reconciliation, removal of the environment fence and
+unpause. A supplied chain cannot reveal its unknown acknowledged suffix.
 
-The restore plan pins an independently trusted final digest before importing.
-Finishing an earlier segment leaves the target waiting for its suffix. Wrong
-lineage/base, missing positions, reordered/duplicated facts, conflicting retries,
-truncation, invalid signatures and broken dependencies cannot complete recovery.
-After the final segment, release still requires the explicit history-reconciled
-operator assertion, removal of the environment fence and a separate unpause.
-No collection number, receipt, acceptance time, reservation or policy is erased.
+For future shards, retain local transactional order and independent checkpoints.
+Accept weaker consistency across shards; colocate things needing atomicity.
+Cross-shard placement and reconciliation are later work, not a reason to preserve
+a global barrier now. The earlier experiments and their failure tests remain on
+[reference/epoch-core-2026-11-05](https://github.com/nickjhay/sprigrun/tree/reference/epoch-core-2026-11-05).
 
-A digest proves the supplied chain, not that no later writes exist. Operators
-must fence the old writer and identify the final trusted cut. If that evidence
-is unavailable, keep the target quarantined. [BARRIER.md](BARRIER.md) journals partition binding and hold/release transitions.
-[CLUSTER.md](CLUSTER.md) extends recovery to the complete cut set: import every
-member in quarantine, check remote references in bounded pages, reconstruct
-controller history, then publish one release decision. Dynamic writer movement
-and public sharded HTTP remain later work.
+See [RECOVERY.md](RECOVERY.md) for invariants and [OPERATIONS.md](OPERATIONS.md)
+for commands, independent witness custody and the recovery promise.

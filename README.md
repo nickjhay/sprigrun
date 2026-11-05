@@ -167,7 +167,6 @@ HTML revalidates; built scripts, CSS, workers and the Moss adapter use content-h
 
 Read **DESIGN.md** for the updated architecture, **RUNTIME.md** for the runtime adapter/I/O contract, and **SECURITY.md** for precise boundaries and limits. This package keeps the future Sprig VM integration separate from the working toy language.
 
-The two-participant snapshot barrier has a local restart drill: `npm run demo:barrier`.
-See [the barrier guide](core/BARRIER.md) for implemented invariants and the remaining sharding work.
-
-[Cross-owner recovery](core/CLUSTER.md) now has a local signed-garden loss drill: `npm run demo:cluster`. Public serving remains single-shard.
+Backups now copy a committed journal prefix without pausing writes or storing
+snapshot epochs. The previous barrier/cluster implementation and tests remain on
+[reference/epoch-core-2026-11-05](https://github.com/nickjhay/sprigrun/tree/reference/epoch-core-2026-11-05).

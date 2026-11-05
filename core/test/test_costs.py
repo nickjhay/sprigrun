@@ -17,6 +17,13 @@ class Costs(unittest.TestCase):
         self.assertAlmostEqual(b['new_sources'] - a['new_sources'], 200 * 2**20 * .5 / (40 * 1024))
         self.assertGreater(a['sql_gb_end'], 10)
         self.assertTrue(any('hard limit' in w for w in a['warnings']))
+    def test_backup_frequency_does_not_write_primary_metadata(self):
+        a = estimate(Scenario(incremental_every_days=0))
+        b = estimate(Scenario(incremental_every_days=1/24))
+        self.assertEqual(a['usage']['sql_rows_written'], b['usage']['sql_rows_written'])
+        self.assertEqual(a['sql_gb_end'], b['sql_gb_end'])
+        self.assertGreater(b['backup_http_requests'], a['backup_http_requests'])
+
     def test_backup_batching_changes_requests_not_stored_bytes(self):
         a = estimate(Scenario(years=1)); b = estimate(Scenario(years=1, metadata_batch=1))
         self.assertLess(a['backup_http_requests'], b['backup_http_requests'])

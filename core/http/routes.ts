@@ -1,7 +1,7 @@
 import type { Env, NativeCoordinator } from '../host/coordinator.ts';
 import { KINDS, type Browse } from '../host/inspection.ts';
 import { MAX_LINE, fields } from '../host/archive.ts';
-import { check, contentAddress, parseAddress, textBytes, utf8, u64 } from '../src/bytes.ts';
+import { check, contentAddress, textBytes, utf8, u64 } from '../src/bytes.ts';
 import { parsePostTarget, parseReference } from '../src/references.ts';
 import { parseReceipt } from '../src/receipt.ts';
 import { actionPage } from './pages.ts';
@@ -127,9 +127,8 @@ function localOperator(request: Request, env: Env) {
 }
 function backupAccess(request: Request, env: Env, path: string): boolean {
     const exportRead = ['GET', 'HEAD'].includes(request.method)
-        && ['/admin/snapshot/header', '/admin/snapshot/page', '/admin/snapshot/record', '/admin/snapshot/batch'].includes(path);
-    const cut = request.method === 'POST' && path === '/admin/cut';
-    return (exportRead || cut) && operator(request, env.BACKUP_TOKEN);
+        && ['/admin/feed/header', '/admin/feed/page', '/admin/feed/record', '/admin/feed/batch'].includes(path);
+    return exportRead && operator(request, env.BACKUP_TOKEN);
 }
 async function operatorRoute(request: Request, env: Env, core: NativeCoordinator, url: URL) {
     const path = url.pathname, p = url.searchParams;
@@ -153,36 +152,36 @@ async function operatorRoute(request: Request, env: Env, core: NativeCoordinator
             const value = core.operatorRecord(p.get('path') ?? '');
             return htmlView(p) ? operatorPage(env, 'Committed result', value) : json(value);
         }
-        if (path.startsWith('/admin/snapshot/')) {
-            const method = path.slice('/admin/snapshot/'.length);
-            const names = method === 'header' ? ['epoch', 'base', 'chain'] : (method === 'page' || method === 'batch') ? ['epoch', 'after'] : method === 'record' ? ['epoch', 'position'] : null;
+        if (path.startsWith('/admin/feed/')) {
+            const method = path.slice('/admin/feed/'.length);
+            const names = method === 'header' ? [] : (method === 'page' || method === 'batch') ? ['journal', 'through', 'after'] : method === 'record' ? ['journal', 'through', 'position'] : null;
             if (!names)
                 throw new HttpError(404, 'not_found');
             query(url, names);
-            const epoch = p.get('epoch') ?? '';
-            u64(epoch);
             if (method === 'header')
-                return text(core.snapshotHeader(epoch, p.get('base'), p.get('chain')));
+                return text(await core.checkpoint());
+            const journal = p.get('journal') ?? '', through = p.get('through') ?? '';
+            u64(through);
             if (method === 'batch')
-                return json(await core.snapshotBatch(epoch, p.get('after') ?? '0'));
+                return json(await core.snapshotBatch(journal, through, p.get('after') ?? '0'));
             if (method === 'page')
-                return json(core.snapshotPage(epoch, p.get('after') ?? '0'));
-            return text(await core.snapshotRecord(epoch, p.get('position') ?? ''));
+                return json(core.snapshotPage(journal, through, p.get('after') ?? '0'));
+            return text(await core.snapshotRecord(journal, through, p.get('position') ?? ''));
         }
     }
     if (request.method !== 'POST')
         throw new HttpError(404, 'not_found');
-    if (!operator(request, env.ADMIN_TOKEN) && !backupAccess(request, env, path))
+    if (!operator(request, env.ADMIN_TOKEN))
         throw new HttpError(404, 'not_found');
     const max = path === '/admin/restore/record' ? MAX_LINE : path === '/admin/restore/begin' ? 65536 : 2048;
-    const known = ['/admin/pause', '/admin/suppress', '/admin/block-author', '/admin/cut', '/admin/restore/begin', '/admin/restore/record', '/admin/restore/finish', '/admin/restore/release'];
+    const known = ['/admin/pause', '/admin/suppress', '/admin/block-author', '/admin/restore/begin', '/admin/restore/record', '/admin/restore/finish', '/admin/restore/release'];
     if (!known.includes(path))
         throw new HttpError(404, 'not_found');
     query(url, path === '/admin/restore/record' ? ['index'] : []);
     const bytes = await body(request, max, env.CORE_HTTP_POLICY?.uploadTimeoutMs ?? 10000);
-    if (path === '/admin/cut' || path === '/admin/restore/finish') {
+    if (path === '/admin/restore/finish') {
         check(bytes.length === 0, 'empty_body_required');
-        return json(path === '/admin/cut' ? await core.cut() : await core.restoreFinish());
+        return json(await core.restoreFinish());
     }
     if (path === '/admin/restore/record')
         return json(await core.restoreRecord(p.get('index') ?? '', utf8(bytes)));

@@ -48,9 +48,9 @@
 - Keep blob preparation outside short metadata commits. No R2 await or arbitrary
   user computation in that commit. Preserve the existing lost-reply, ambiguous
   PUT, late-preparation and bounded-preparation failure cases.
-- Tag accepted immutable facts by snapshot epoch. Advance the barrier with
-  bounded control state; export later. Counters and heads must be reconstructible
-  or have retained historical allocation facts.
+- Retain immutable facts and a transactional journal pointer. Capture a committed
+  prefix and bounded control state without writes; copy later. Counters and heads
+  must be reconstructible or have retained historical allocation facts.
 - Receipt/body suppression must not erase the consumed action ID or make old
   addresses reusable. A removed payload can make verification unavailable.
 
@@ -58,8 +58,9 @@
 
 - Commit a reconstruction fact, its journal pointer and monotonic u64 recovery
   position atomically. Rejected actions, retries and reads add no journal entry.
-- Copy a closed epoch while later commits continue. Project private preparations
-  at the cut; preserve their debit without requiring unpublished bytes.
+- Capture control and journal position synchronously, then wait for durability.
+  Copy only that prefix while later commits continue. Preserve private reservation
+  debit without requiring unpublished bytes; include bodies at acceptance.
 - Restore times, numbers, accounting, key evidence, receipts, content hiding and author blocks
   together. The archived moderation count must match its contiguous history. Match every entry and published source to retained acceptance.
 - Verify source hashes, exact action/receipt correspondence, signature evidence,
@@ -67,7 +68,7 @@
 - Commit each imported record with its resume cursor. A repeated acknowledgement
   or ambiguous R2 write must not duplicate history or debit.
 - Require an empty target, matching origin/policy and pinned final chain digest.
-  Bind each increment to the exact preceding cut/digest and journal identity.
+  Bind each increment to the exact preceding checkpoint/digest and journal identity.
   Missing/reordered/duplicate positions or segments cannot complete the plan.
   Persist quarantine independently of environment settings; incomplete or invalid
   history cannot become readable by accidentally dropping the setting.
@@ -107,52 +108,21 @@ Before public release, establish a recovery procedure, calibrate metadata/traffi
 limits and costs, and establish report/suppression and independent backup
 operations. The protocol demo and frozen fixtures make none of those claims.
 
-## Logical-owner and policy obligations
+## Local ownership and future shards
 
-- Result, receipt and evidence paths derive the same stable logical owner. Source
-  preparation stays with that source; numbered results stay with their collection.
-  Public HTTP still uses one coordinator; the local cluster enforces fixed ownership.
-- Policy application and cursor updates commit together. Gaps/conflicting history
+- Result, receipt and evidence paths derive the same logical owner. Source
+  preparation belongs to that source; numbered results belong to their collection.
+  All current operations use one metadata database.
+- Moderation facts and their cursor commit together. Gaps/conflicting history
   reject; a delayed identical change cannot replace a newer decision.
-- Refresh work is bounded to 32 changes per tick, coalesces concurrent calls and
-  backs off unavailable upstreams. The local authority requires no poller.
 - A block does not hide historical signatures. A hide does not revoke signing
   authority. Public evidence and exact-retry receipts cannot bypass hiding.
-- Direct result reads use retained accepted state, never a discovery listing as
-  proof of acceptance. Cross-owner reads use registered owners and retain this trust boundary.
+- Direct reads use retained accepted state, never a discovery listing as proof.
+- Future shards may have independently captured prefixes and weaker consistency
+  between them. Do not assume a global order, simultaneous policy view or atomic
+  cross-shard snapshot. Colocate relationships needing atomicity; design missing
+  reference reconciliation and single-writer fencing when sharding is introduced.
 
-## Fixed-roster barrier obligations (D1 laboratory)
-
-- Partition capacity and refill sums equal the global policy, including remainders.
-- Persist and check topology/member/journal identity; missing data cannot silently
-  bootstrap a fresh writer. Initialize only over pristine members.
-- A durable hold gates every recoverable mutation and attempt debit, with no R2
-  await in the transaction. Private uploads do not postpone the boundary.
-- Cut each member once; publish the complete manifest before releasing anyone.
-  Fetch release evidence from the trusted controller and compare the local cut.
-- Replay lost replies and restart at each stage without undoing manual pause,
-  duplicating cuts or reopening an incomplete manifest.
-- Preserve barrier facts in full/delta archives; refuse standalone shard recovery
-  release; only the fully verified cluster procedure may release them. Public sharded HTTP stays off.
-
-See [BARRIER.md](BARRIER.md) for scope, failure evidence and the linked cluster recovery procedure.
-
-## Cross-owner recovery obligations
-
-- A write can commit only on the fixed physical owner. Remote facts come from
-  registered journals, never caller-supplied evidence or unaccepted R2 objects.
-- A complete epoch boundary contains every accepted dependency of every result.
-  All holds precede all cuts. Local commit rechecks prevent an in-flight action
-  crossing into the closed epoch.
-- Cluster restore pins every final archive digest before import. No member can
-  be released until every member completes and every retained dependency is
-  found within its planned journal/cut. Local predecessors remain earlier in
-  position; remote predecessors cannot have a later epoch.
-- Follower policy must match the authoritative retained stream exactly. A
-  snapshot preserves applied prefixes, not an invented simultaneous policy view.
-- Verification cursors and reconstructed barrier history are durable. Partial
-  import, lost replies, early environment changes and stale release requests
-  cannot revive credits, reuse an old barrier ID or bypass quarantine.
-
-The trusted plan and old-writer fence remain operator inputs. No claim of unknown
-suffix discovery, dynamic migration safety or public cluster readiness is made.
+The global barrier, fixed roster and cluster-recovery experiments are removed
+from active code and preserved with their failure tests on
+[reference/epoch-core-2026-11-05](https://github.com/nickjhay/sprigrun/tree/reference/epoch-core-2026-11-05).

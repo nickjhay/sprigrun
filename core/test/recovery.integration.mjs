@@ -44,7 +44,7 @@ test('loss of SQLite and R2: restore exact receipts, authority, times and suppre
   assert.equal((await restore(c, archive, saved.footer.chain)).phase, 'restored');
   assert.equal((await c.restoreFinish()).phase, 'restored');
   const state = await c.stats();
-  assert.equal(state.epoch, '1'); assert.equal(state.paused, true);
+  assert.equal(Object.hasOwn(state, 'epoch'), false); assert.equal(state.paused, true);
   for (const k of ['growth', 'burst', 'attempts']) assert.equal(state[k].tokens, 0);
   for (const k of ['moderation', 'accepted', 'reservedBytes', 'acceptedDebit']) assert.equal(state[k], saved.header.control[k]);
   await assert.rejects(c.read(garden.source), /recovery_mode/);
@@ -99,7 +99,7 @@ test('interrupted restore resumes after restart; a lost acknowledgement can repe
   assert.equal((await restore(host.core, archive, saved.footer.chain)).phase, 'restored');
   await host.dispose(); host = await localNative({ directory, policy: drillPolicy });
   await assert.rejects(host.core.read(garden.source), /recovery_mode/);
-  await assert.rejects(host.core.cut(), /recovery_mode/);
+  await assert.rejects(host.core.checkpoint(), /recovery_mode/);
 });
 
 test('a trusted digest is required before mutating the target', async t => {
@@ -126,7 +126,7 @@ test('archive framing rejects truncation, duplicate JSON keys, CRLF, reorder and
   const variants = [
     all.join('\n'), // missing final newline
     all.slice(0, -1).join('\n') + '\n',
-    all[0].replace('"epoch":"0"', '"epoch":"0","epoch":"0"') + '\n' + all.slice(1).join('\n') + '\n',
+    all[0].replace('"type":"header"', '"type":"header","type":"header"') + '\n' + all.slice(1).join('\n') + '\n',
     all.join('\r\n') + '\r\n',
     [all[0], all[2], all[1], ...all.slice(3)].join('\n') + '\n',
     all.join('\n') + '\n{}\n',
@@ -160,20 +160,22 @@ test('recomputed checksum cannot substitute for signature, entry or acceptance v
   }
 });
 
-test('a cut stays stable after later appends, visibility changes and other cuts; pages bound examined rows', async t => {
+test('a read-only checkpoint stays stable after later appends and visibility changes; pages bound examined rows', async t => {
   const host = await localNative({ policy: drillPolicy }); t.after(() => host.dispose());
   const core = host.core;
-  const planted = await plant(core), epoch = await core.cut();
-  const headerBefore = await core.snapshotHeader(epoch);
+  const planted = await plant(core), before = await core.stats();
+  const headerBefore = await core.checkpoint();
+  assert.deepEqual(await core.stats(), before);
+  const { journal, position: through } = JSON.parse(headerBefore).control;
   await core.suppress(planted.hidden, false);
   await core.blockAuthor(planted.key, false);
   for (let i = 0; i < 40; i++) await core.submit(action('/grove/aaa_' + i, planted.source + '\n'));
-  await core.cut();
+  await core.checkpoint();
   const cutPosition = JSON.parse(headerBefore).control.position;
-  const first = await core.snapshotPage(epoch, cutPosition);
+  const first = await core.snapshotPage(journal, through, cutPosition);
   assert.deepEqual(first.keys, []); assert.equal(first.done, true); assert.equal(first.after, cutPosition);
   const file = join(scratch, 'later-copy.jsonl');
-  const b = await backup(core, file, epoch), rows = [];
+  const b = await backup(core, file, headerBefore), rows = [];
   for await (const line of lines(file)) rows.push(parseLine(line));
   assert.equal(rows.filter(r => r.type === 'results').length, 7);
   assert.equal(rows.filter(r => r.type === 'moderation' && r.row.path === planted.hidden).length, 1);
@@ -181,8 +183,10 @@ test('a cut stays stable after later appends, visibility changes and other cuts;
   assert.equal(block.length, 1); assert.equal(block[0].row.active, 1);
   const recovered = await target(t);
   assert.equal((await restore(recovered, file, b.footer.chain)).phase, 'restored');
-  assert.equal(await core.snapshotHeader(epoch), headerBefore);
-  await assert.rejects(core.snapshotPage(epoch, 'control; DROP TABLE entries'), /invalid_u64/);
+  assert.equal(b.header.control.position, through);
+  await assert.rejects(core.snapshotPage(journal, through, 'control; DROP TABLE entries'), /invalid_u64/);
+  await assert.rejects(core.snapshotPage('f'.repeat(32), through, '0'), /archive_journal_mismatch/);
+  await assert.rejects(core.snapshotPage(journal, '18446744073709551615', '0'), /archive_cursor_ahead/);
 });
 
 test('backup publication is exclusive and leaves no partial files on failure', async t => {
@@ -198,7 +202,7 @@ test('backup publication is exclusive and leaves no partial files on failure', a
 test('empty history and a maximally escaped source both fit the bounded archive format', async t => {
   const host = await localNative({ policy: drillPolicy }); t.after(() => host.dispose());
   const emptyFile = join(scratch, 'empty.jsonl'), empty = await backup(host.core, emptyFile);
-  assert.equal(empty.footer.count, '1');
+  assert.equal(empty.footer.count, '0');
   const emptyTarget = await target(t);
   assert.equal((await restore(emptyTarget, emptyFile, empty.footer.chain)).phase, 'restored');
   await host.core.submit(action('/sea', '\0'.repeat(256 * 1024)));
@@ -207,7 +211,7 @@ test('empty history and a maximally escaped source both fit the bounded archive 
   assert.equal((await restore(core, file, saved.footer.chain)).phase, 'restored');
 });
 
-test('ordered record verification is bounded, survives restart and stays quarantined until the cut', async t => {
+test('ordered record verification is bounded, survives restart and stays quarantined through the checkpoint', async t => {
   const original = await localNative({ policy: drillPolicy }); t.after(() => original.dispose());
   const g = await plant(original.core);
   // The journal now places predecessors before dependents; each import verifies one bounded record.
@@ -261,13 +265,13 @@ test('missing and repeated policy facts cannot be hidden by recomputing the arch
   const missing = await changed(rows => {
     const at = rows.findLastIndex(r => r.type === 'moderation'); rows.splice(at, 1);
   });
-  await assert.rejects(verify(missing.file, missing.footer.chain), /archive_position_gap/);
+  await assert.rejects(verify(missing.file, missing.footer.chain), /archive_accounting/);
   const repeated = await changed(rows => {
     const policies = rows.filter(r => r.type === 'moderation');
     policies[2].row.active = policies[1].row.active; // Same plot hide decision twice.
   });
   await verify(repeated.file, repeated.footer.chain);
   const core = await target(t);
-  await assert.rejects(restore(core, repeated.file, repeated.footer.chain), /archive_policy_repeated_or_rewound/);
+  await assert.rejects(restore(core, repeated.file, repeated.footer.chain), /archive_policy_repeated/);
   await assert.rejects(core.read(garden.source), /recovery_mode/);
 });

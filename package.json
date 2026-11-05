@@ -14,7 +14,7 @@
     "dev:ui": "node scripts/dev.mjs --ui-only",
     "typecheck": "tsc --noEmit && tsc -p store/tsconfig.json --noEmit && tsc -p store/tsconfig.client.json --noEmit && tsc -p channels/tsconfig.json --noEmit && tsc -p channels/tsconfig.client.json --noEmit && tsc -p core/tsconfig.json --noEmit && tsc -p core/host/tsconfig.json --noEmit",
     "test": "node --test test/*.test.mjs",
-    "check": "npm run typecheck && npm run test:core && npm run test:acceptance && npm run test:barrier && npm run test:cluster && npm run test:recovery && npm run test:http && npm run test:operations && npm test && npm run test:store && npm run test:channels && npm run test:pricing && npm run test:costs && npm run build",
+    "check": "npm run typecheck && npm run test:core && npm run test:acceptance && npm run test:recovery && npm run test:http && npm run test:operations && npm test && npm run test:store && npm run test:channels && npm run test:pricing && npm run test:costs && npm run build",
     "test:store": "npm --prefix store test && node --test test/store.integration.mjs",
     "seed": "node scripts/seed.mjs",
     "predemo:names": "node scripts/check-node.mjs",
@@ -28,12 +28,10 @@
     "test:channels": "node --test --test-concurrency=1 channels/test/*.test.mjs",
     "test:pricing": "cd store && python3 -m unittest discover -s test -p 'test_*.py'",
     "test:core": "node --test core/test/*.test.mjs",
-    "test:barrier": "node --test --test-concurrency=1 core/test/barrier.integration.mjs",
     "test:acceptance": "node --test core/test/acceptance.integration.mjs",
     "demo:core": "node core/scripts/demo.mjs",
     "seed:core": "node core/scripts/seeds.mjs",
     "test:recovery": "node --test --test-concurrency=1 core/test/recovery*.integration.mjs",
-    "demo:barrier": "node core/scripts/barrier-garden.mjs",
     "demo:recovery": "node core/scripts/recovery-garden.mjs",
     "verify:recovery": "node core/scripts/recover.mjs verify",
     "dev:core": "node core/scripts/dev.mjs",
@@ -41,9 +39,7 @@
     "backup:core": "node core/scripts/backup.mjs",
     "rehearse:core": "node core/scripts/rehearse.mjs",
     "test:operations": "node --test core/test/operations.integration.mjs",
-    "test:costs": "python3 -m unittest core.test.test_costs",
-    "test:cluster": "node --test --test-concurrency=1 core/test/cluster.integration.mjs",
-    "demo:cluster": "node core/scripts/cluster-garden.mjs"
+    "test:costs": "python3 -m unittest core.test.test_costs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261026.1",

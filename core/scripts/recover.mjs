@@ -6,7 +6,7 @@ import { nativeClient } from './http-client.mjs';
 import { randomUUID } from 'node:crypto';
 import { check, nextU64, u64, utf8 } from '../src/bytes.ts';
 import { advance, canonical, complete, end, hash, initial, MAX_LINE, parseLine,
-  cutFromHeader, validateHeader, validateRecord } from '../host/archive.ts';
+  checkpointFromHeader, validateHeader, validateRecord } from '../host/archive.ts';
 
 /** Bounded physical lines; reject truncation, CRLF, noncanonical JSON and trailing data. */
 export async function* lines(file) {
@@ -37,14 +37,15 @@ export async function verify(file, expectedChain) {
   return { header, footer, progress };
 }
 /** The adapter may be local or authenticated operator RPC. No public route needed. */
-export async function backup(core, file, epoch, base = null) {
-  // Refuse a known collision before creating a cut or doing remote export work.
+export async function backup(core, file, checkpoint, base = null) {
+  // Refuse a known collision before reading a checkpoint or doing remote export work.
   try { await lstat(file); throw Error('archive_exists'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
-  epoch ??= await core.cut();
-  const header = validateHeader(parseLine(await core.snapshotHeader(epoch, base?.header.epoch ?? null, base?.footer.chain ?? null)));
-  if (base !== null) check(canonical(header.base) === canonical({ chain: base.footer.chain, cut: cutFromHeader(base.header) }), 'archive_base_mismatch');
-  else check(header.base === null, 'archive_base_mismatch');
+  const header = validateHeader(parseLine(checkpoint ?? await core.checkpoint()));
+  check(header.base === null, 'archive_base_mismatch');
+  if (base !== null) header.base = { chain: base.footer.chain, checkpoint: checkpointFromHeader(base.header) };
+  validateHeader(header);
+  const { journal, position: through } = header.control;
   if (core.origin !== undefined) check(header.control.origin === core.origin, 'archive_origin');
   const temporary = file + '.' + randomUUID() + '.partial';
   let handle;
@@ -55,11 +56,11 @@ export async function backup(core, file, epoch, base = null) {
     let after = progress.position;
     for (;;) {
       const batch = typeof core.snapshotBatch === 'function';
-      const page = batch ? await core.snapshotBatch(epoch, after) : await core.snapshotPage(epoch, after);
+      const page = batch ? await core.snapshotBatch(journal, through, after) : await core.snapshotPage(journal, through, after);
       const entries = batch ? page.records : page.keys;
       check(Array.isArray(entries) && entries.length <= 32 && typeof page.done === 'boolean', 'archive_page_limit');
       for (const item of entries) {
-        const line = batch ? item : await core.snapshotRecord(epoch, item);
+        const line = batch ? item : await core.snapshotRecord(journal, through, item);
         progress = await advance(progress, await validateRecord(parseLine(line), header), line);
         await handle.writeFile(line + '\n');
       }
@@ -79,9 +80,9 @@ export async function backup(core, file, epoch, base = null) {
     await handle?.close(); await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
   }
 }
-export async function incrementalBackup(core, file, baseFile, baseChain, epoch) {
+export async function incrementalBackup(core, file, baseFile, baseChain, checkpoint) {
   hash(baseChain);
-  return backup(core, file, epoch, await verify(baseFile, baseChain));
+  return backup(core, file, checkpoint, await verify(baseFile, baseChain));
 }
 async function importChecked(core, file, checked, target) {
   const status = await core.restoreBegin(canonical(checked.header), canonical(checked.footer), target);
@@ -110,7 +111,7 @@ export async function verifyChain(files, target) {
     const part = await verify(file), previous = checked.at(-1);
     if (!previous) check(part.header.base === null, 'restore_requires_snapshot');
     else check(part.header.base !== null && part.header.base.chain === previous.footer.chain
-      && canonical(part.header.base.cut) === canonical(cutFromHeader(previous.header)), 'archive_base_mismatch');
+      && canonical(part.header.base.checkpoint) === canonical(checkpointFromHeader(previous.header)), 'archive_base_mismatch');
     checked.push(part);
   }
   check(checked.at(-1).footer.chain === target, 'archive_trusted_digest_mismatch');
@@ -146,7 +147,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     check(command === 'verify' && file && (!flag || (flag === '--chain' && chain)) && args.length <= 3,
       'usage: node core/scripts/recover.mjs verify FILE [--chain TRUSTED_SHA256]');
     const result = await verify(file, chain);
-    console.log(`Verified archive framing, source hashes and accounting: ${result.footer.count} records, epoch ${result.header.epoch}`);
+    console.log(`Verified archive framing, source hashes and accounting: ${result.footer.count} records, through ${result.header.control.position}`);
     console.log(`Chain: ${result.footer.chain}`);
     console.log('Authority and cross-reference checks also run in the quarantined restore target.');
   }

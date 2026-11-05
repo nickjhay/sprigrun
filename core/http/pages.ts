@@ -69,8 +69,8 @@ export function ontology() {
         ['Collection head', 'heads', 'An index over committed entry numbers; it never rewinds on suppression.'],
         ['Admission', 'control', 'Growth credit, attempt credit, pause state and historical totals.'],
         ['Moderation', 'moderation', 'Ordered hide/block decisions. Hiding a result does not free its address; blocking a key only prevents new actions.'],
-        ['Snapshot', 'cuts', 'A closed epoch, control state and policy for a later copy.'],
-        ['Recovery', 'recovery / journal', 'Operator import progress and ordered pointers to durable facts.'],
+        ['Journal', 'journal', 'Ordered pointers to immutable facts; a checkpoint captures a prefix without changing the database.'],
+        ['Recovery', 'recovery', 'Operator import progress while the target remains quarantined.'],
         ['Live work', 'process memory', 'Bounded active requests and read credit; temporary, not recoverable history.'],
     ].map(r => '<tr>' + r.map(c => '<td>' + escape(c) + '</td>').join('') + '</tr>').join('')}</tbody></table></div>`;
 }
@@ -106,5 +106,5 @@ export function actionPage(env: Env, info: {
     return shell(env, receipt ? 'Receipt' : 'Action', `<div class="record-head"><div><div class="eyebrow">${receipt ? 'Host acknowledgement' : 'Exact intent'}</div><h1>${receipt ? 'A place in the record.' : 'The act of publishing.'}</h1></div>${badge(info.id)}</div><dl><dt>Action ID</dt><dd class="path">${escape(info.id)}</dd><dt>Result</dt><dd class="path">${link(view(info.result), info.result)}</dd><dt>Author</dt><dd class="path">${info.author ? link(view(info.author), info.author) : 'Anonymous'}</dd></dl><div class="tools">${link('/' + (receipt ? 'receipt' : 'action') + info.result, 'Exact text')}${link(view('/' + (receipt ? 'action' : 'receipt') + info.result), receipt ? 'Action' : 'Receipt')}${link('/evidence' + info.result, 'Signature evidence')}${link('/spec/' + (receipt ? 'receipt' : 'action') + '/1', 'Format')}</div>${pre(body)}${receipt ? '<p class="note">This is an unsigned acknowledgement by the host. It is not an execution proof.</p>' : ''}`);
 }
 export function operatorPage(env: Env, table: string, value: unknown, next: string | null = null) {
-    return shell(env, 'Operator · ' + table, `<div class="eyebrow">Operator inspection</div><h1>${escape(table)}</h1><p class="notice">Private operational view. Reservations do not prove that bytes exist in R2. Inspection does not scan the bucket or change history.</p><div class="tools">${['control', 'sources', 'results', 'heads', 'moderation', 'cuts', 'recovery', 'journal'].map(t => link('/admin/inspect?view=html&table=' + t, t)).join('')}</div>${pre(JSON.stringify(value, null, 2))}${next ? '<a class="next" href="' + escape(next) + '">Continue →</a>' : ''}${ontology()}`);
+    return shell(env, 'Operator · ' + table, `<div class="eyebrow">Operator inspection</div><h1>${escape(table)}</h1><p class="notice">Private operational view. Reservations do not prove that bytes exist in R2. Inspection does not scan the bucket or change history.</p><div class="tools">${['control', 'sources', 'results', 'heads', 'moderation', 'recovery', 'journal'].map(t => link('/admin/inspect?view=html&table=' + t, t)).join('')}</div>${pre(JSON.stringify(value, null, 2))}${next ? '<a class="next" href="' + escape(next) + '">Continue →</a>' : ''}${ontology()}`);
 }

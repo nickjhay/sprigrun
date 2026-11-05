@@ -1,6 +1,4 @@
-import { shardFor, barrierTransition, same } from './topology.ts';
-import { fact, checkResultLinks, type Fact } from './facts.ts';
-import type { ClusterPlan } from './cluster.ts';
+import { fact, checkResultLinks } from './facts.ts';
 import { check, nextU64, orderedU64, textBytes, u64, utf8 } from '../src/bytes.ts';
 import { verifyAction, plotBindingBytes } from '../src/authority.ts';
 import { receiptForAction } from '../src/receipt.ts';
@@ -10,18 +8,14 @@ import { Moderation, type PolicyChange } from './moderation.ts';
 import type { Policy } from './policy.ts';
 import { bodyValue } from './placement.ts';
 import { loadSource, putSource } from './objects.ts';
-import { advance, canonical, complete, cutHeader, cutFromHeader, digest, end, hash, initial, PAGE_SIZE,
+import { advance, canonical, complete, checkpointFromHeader, FORMAT, digest, end, hash, initial, PAGE_SIZE,
   parseLine, TABLES, validateHeader, validateRecord, recordKey,
-  type Cut, type End, type Header, type Progress, type Record } from './archive.ts';
+  type End, type Header, type Progress, type Record } from './archive.ts';
 
 type Session = { phase: 'starting' | 'importing' | 'awaiting_delta' | 'restored' | 'released';
-  header: Header; footer: End; target: string; cluster: string | null; checked: string; progress: Progress; lastHash: string | null };
-export type PositionedFact = { fact: Fact; position: string; journal: string };
-export type ClusterAccess = { plan: (hash: string) => Promise<ClusterPlan>;
-  fact: (path: string, hash: string) => Promise<PositionedFact>;
-  policy: (position: string, hash: string) => Promise<PolicyChange> };
+  header: Header; footer: End; target: string; progress: Progress; lastHash: string | null };
 export class Recovery {
-  constructor(private ctx: DurableObjectState, private db: State, private bucket: R2Bucket, private p: Policy, private cluster: ClusterAccess | null = null) {
+  constructor(private ctx: DurableObjectState, private db: State, private bucket: R2Bucket, private p: Policy) {
     db.sql.exec('CREATE TABLE IF NOT EXISTS recovery (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)');
   }
   session(): Session | null {
@@ -30,38 +24,38 @@ export class Recovery {
   }
   locked() { const s = this.session(); return s !== null && s.phase !== 'released'; }
   private save(s: Session) { this.db.sql.exec('INSERT OR REPLACE INTO recovery VALUES(1, ?)', JSON.stringify(s)); }
-  private cut(epoch: string): Cut {
-    const row = this.db.sql.exec<Cut>('SELECT * FROM cuts WHERE epoch=?', orderedU64(epoch)).toArray()[0];
-    check(row, 'snapshot_unavailable'); return row;
+  /** Capture metadata synchronously, then fence durability. No writes, epochs or held transaction. */
+  async checkpoint(): Promise<string> {
+    const h = validateHeader({ type: 'header', format: FORMAT, capturedAtMs: String(Date.now()),
+      control: this.db.control(), policy: this.p, base: null });
+    await this.ctx.storage.sync(); return canonical(h);
   }
-  header(epoch: string, baseEpoch: string | null = null, chain: string | null = null): string {
-    const h = cutHeader(this.cut(epoch));
-    check((baseEpoch === null) === (chain === null), 'archive_base_required');
-    if (baseEpoch !== null) h.base = { chain: chain!, cut: this.cut(baseEpoch) };
-    return canonical(validateHeader(h));
+  private boundary(journal: string, through: string) {
+    u64(through);
+    const c = this.db.control();
+    check(journal === c.journal, 'archive_journal_mismatch');
+    check(u64(through) <= u64(c.position), 'archive_cursor_ahead');
+    return { control: { origin: c.origin, position: through } };
   }
-  /** A closed position bounds keys examined; later writes cannot lengthen the scan. */
-  page(epoch: string, after: string) {
-    const h = cutHeader(this.cut(epoch)); u64(after);
-    check(u64(after) <= u64(h.control.position), 'archive_cursor');
+  page(journal: string, through: string, after: string) {
+    this.boundary(journal, through); u64(after);
+    check(u64(after) <= u64(through), 'archive_cursor');
     const rows = this.db.sql.exec<ChangeIndex>(
       'SELECT * FROM journal WHERE position>? AND position<=? ORDER BY position LIMIT ?',
-      orderedU64(after), orderedU64(h.control.position), PAGE_SIZE).toArray();
+      orderedU64(after), orderedU64(through), PAGE_SIZE).toArray();
     const cursor = rows.length ? String(BigInt(rows.at(-1)!.position)) : after;
-    return { keys: rows.map(r => String(BigInt(r.position))), after: cursor, done: cursor === h.control.position };
+    return { keys: rows.map(r => String(BigInt(r.position))), after: cursor, done: cursor === through };
   }
-  private index(epoch: string, position: string) {
-    u64(position);
-    const h = cutHeader(this.cut(epoch));
-    check(u64(position) > 0n && u64(position) <= u64(h.control.position), 'archive_position');
+  private index(journal: string, through: string, position: string) {
+    u64(position); const h = this.boundary(journal, through);
+    check(u64(position) > 0n && u64(position) <= u64(through), 'archive_position');
     const i = this.db.sql.exec<ChangeIndex>('SELECT * FROM journal WHERE position=?', orderedU64(position)).toArray()[0];
     check(i, 'snapshot_record_unavailable'); return { h, i };
   }
-  private async expanded(h: Header, i: ChangeIndex): Promise<Record> {
+  private async expanded(h: { control: { origin: string; position: string } }, i: ChangeIndex): Promise<Record> {
     const position = i.position;
     let r: Record;
-    if (i.kind === 'barrier') r = { type: 'barrier', position, state: JSON.parse(i.key) };
-    else if (i.kind === 'pause') {
+    if (i.kind === 'pause') {
       check(i.key === '0' || i.key === '1', 'archive_pause');
       r = { type: 'pause', position, paused: i.key === '1' };
     }
@@ -74,20 +68,17 @@ export class Recovery {
     } else if (i.kind === 'moderation') {
       const row = this.db.sql.exec<PolicyChange>('SELECT * FROM moderation WHERE position=?', i.key).toArray()[0];
       check(row, 'snapshot_record_unavailable'); r = { type: 'moderation', position, row };
-    } else {
-      check(i.kind === 'cuts', 'archive_record');
-      r = { type: 'cuts', position, row: this.cut(String(BigInt(i.key))) };
-    }
+    } else throw Error('invalid_journal_kind');
     await validateRecord(r, h); return r;
   }
-  async record(epoch: string, position: string): Promise<string> {
-    const { h, i } = this.index(epoch, position); return canonical(await this.expanded(h, i));
+  async record(journal: string, through: string, position: string): Promise<string> {
+    const { h, i } = this.index(journal, through, position); return canonical(await this.expanded(h, i));
   }
-  async batch(epoch: string, after: string) {
-    const page = this.page(epoch, after), records: string[] = [];
+  async batch(journal: string, through: string, after: string) {
+    const page = this.page(journal, through, after), records: string[] = [];
     let bytes = 0, cursor = after;
     for (const position of page.keys) {
-      const { h, i } = this.index(epoch, position);
+      const { h, i } = this.index(journal, through, position);
       // Estimate escaped source bytes before paid R2 work; never prefetch the next source.
       const result = i.kind === 'results' ? this.db.result(i.key) : null;
       const source = result?.source === null || result?.source === undefined ? null : this.db.source(result.source);
@@ -98,21 +89,12 @@ export class Recovery {
     }
     return { records, after: cursor, done: page.done && cursor === page.after };
   }
-  async begin(headerLine: string, footerLine: string, target?: string, cluster: string | null = null) {
+  async begin(headerLine: string, footerLine: string, target?: string) {
     const header = validateHeader(parseLine(headerLine)), footer = end(parseLine(footerLine));
     target ??= footer.chain; hash(target);
-    check(same(header.control.partition, this.db.control().partition), 'restore_partition_mismatch');
     check(header.control.origin === this.db.control().origin, 'archive_origin');
     check(canonical(header.policy) === canonical(this.p), 'restore_policy_mismatch');
-    if (header.control.partition !== null) {
-      check(cluster !== null && this.cluster !== null, 'cluster_recovery_required');
-      const plan = await this.cluster.plan(cluster), final = plan.finals[header.control.partition.shard]!;
-      check(target === final.footer.chain && header.control.journal === final.header.control.journal
-        && same(header.control.partition, final.header.control.partition)
-        && u64(header.epoch) <= u64(final.header.epoch), 'cluster_restore_target');
-    } else check(cluster === null, 'restore_partition_mismatch');
     let s = this.session();
-    if (s) check(s.cluster === cluster, 'different_restore_active');
     const identical = s && canonical(s.header) === headerLine && canonical(s.footer) === footerLine;
     if (identical) check(s!.target === target, 'different_restore_target');
     else {
@@ -121,24 +103,24 @@ export class Recovery {
         if (s) {
           check(s.phase === 'awaiting_delta' && s.target === target, 'different_restore_active');
           check(header.base !== null && header.base.chain === s.footer.chain
-            && canonical(header.base.cut) === canonical(cutFromHeader(s.header)), 'restore_base_mismatch');
+            && canonical(header.base.checkpoint) === canonical(checkpointFromHeader(s.header)), 'restore_base_mismatch');
         } else {
           check(header.base === null, 'restore_requires_snapshot');
           const c = this.db.control();
-          check(c.position === '0' && c.epoch === '0' && c.moderation === '0'
+          check(c.position === '0' && c.moderation === '0'
             && c.accepted === '0' && c.reservedBytes === '0' && c.acceptedDebit === '0', 'restore_requires_empty_target');
           for (const table of [...TABLES, 'journal', 'heads'])
             check(this.db.sql.exec(`SELECT 1 FROM ${table} LIMIT 1`).toArray().length === 0, 'restore_requires_empty_target');
           c.paused = true; this.db.save(c);
         }
-        s = { phase: header.base === null ? 'starting' : 'importing', header, footer, target: target!, progress, lastHash: null, cluster, checked: '0' };
+        s = { phase: header.base === null ? 'starting' : 'importing', header, footer, target: target!, progress, lastHash: null };
         this.save(s);
       });
       await this.ctx.storage.sync();
     }
     check(s !== null, 'restore_not_active');
     if (s.phase === 'starting') {
-      if (cluster === null) check((await this.bucket.list({ limit: 1 })).objects.length === 0, 'restore_requires_empty_bucket');
+      check((await this.bucket.list({ limit: 1 })).objects.length === 0, 'restore_requires_empty_bucket');
       s.phase = 'importing'; this.save(s); await this.ctx.storage.sync();
     }
     return this.status();
@@ -148,15 +130,15 @@ export class Recovery {
     return s === null ? null : { phase: s.phase, count: s.progress.count, chain: s.progress.chain,
       expected: s.footer.chain, target: s.target, position: s.progress.position };
   }
-  private existing(path: string, epoch: string): Result {
+  private existing(path: string): Result {
     const result = this.db.result(path);
-    check(result && result.epoch <= epoch, 'archive_missing_result');
+    check(result, 'archive_missing_result');
     return result;
   }
   private async verifyResult(a: Result, body: Uint8Array<ArrayBuffer>, h: Header): Promise<void> {
     if (a.source !== null) {
       const source = this.db.source(a.source);
-      check(source && source.reserved_epoch <= a.epoch, 'archive_missing_source');
+      check(source, 'archive_missing_source');
     }
     const bytes = textBytes(a.header + utf8(body));
     const { action, receipt } = await receiptForAction(bytes, textBytes(a.receipt), h.control.origin);
@@ -195,18 +177,16 @@ export class Recovery {
     if (record.type === 'results') {
       const a = record.row, body = textBytes(a.source === null ? a.body! : record.body!);
       await this.verifyResult(a, body, s.header);
-      if (s.cluster === null) await checkResultLinks(a, s.header.control.origin, async path => fact(this.existing(path, a.epoch)));
+      await checkResultLinks(a, s.header.control.origin, async path => fact(this.existing(path)));
       if (a.source !== null) await putSource(this.bucket, a.source, body);
     }
     this.ctx.storage.transactionSync(() => {
       if (record.type === 'moderation') {
         const v = record.row, previous = new Moderation(this.db).decision(v.effect, v.path);
-        check(!previous || (previous.active !== v.active && previous.epoch <= v.epoch), 'archive_policy_repeated_or_rewound');
-        const last = this.db.sql.exec<{ epoch: string }>('SELECT epoch FROM moderation ORDER BY position DESC LIMIT 1').toArray()[0];
-        check(!last || last.epoch <= v.epoch, 'archive_policy_epoch_rewound');
-        if (s.cluster === null && parseReference(v.path).kind !== 'sea') this.existing(v.path, orderedU64(s.progress.epoch));
+        check(!previous || previous.active !== v.active, 'archive_policy_repeated');
+        if (parseReference(v.path).kind !== 'sea') this.existing(v.path);
       }
-      if (record.type !== 'pause' && record.type !== 'barrier') {
+      if (record.type !== 'pause') {
         const r = record.row, columns = Object.keys(r), values = columns.map(k => (r as { [key: string]: SqlStorageValue })[k]!);
         this.db.sql.exec(`INSERT INTO ${record.type} (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`, ...values);
       }
@@ -227,14 +207,13 @@ export class Recovery {
     complete(s.header, s.progress, s.footer);
     this.ctx.storage.transactionSync(() => {
       const c: Control = structuredClone(s.header.control), now = Date.now();
-      c.epoch = nextU64(s.header.epoch); c.paused = true;
+      c.paused = true;
       for (const key of ['growth', 'burst', 'attempts'] as const) c[key] = { tokens: 0, atMs: now, remainder: 0 };
       this.db.save(c); s.phase = s.footer.chain === s.target ? 'restored' : 'awaiting_delta'; this.save(s);
     });
     await this.ctx.storage.sync(); return this.status();
   }
   async release(chain: string, confirmation: string) {
-    check(this.db.control().partition === null, 'cluster_recovery_required');
     const s = this.session(); check(s && ['restored', 'released'].includes(s.phase), 'restore_not_complete');
     check(chain === s.target && s.footer.chain === s.target && confirmation === 'history-reconciled', 'restore_history_confirmation');
     if (s.phase !== 'released') this.ctx.storage.transactionSync(() => {
@@ -245,85 +224,4 @@ export class Recovery {
     });
     await this.ctx.storage.sync(); return this.status();
   }
-  pristine() {
-    const c = this.db.control();
-    check(c.partition !== null && c.position === '0' && c.epoch === '0' && this.session() === null, 'restore_requires_empty_target');
-    for (const table of [...TABLES, 'journal', 'heads'])
-      check(!this.db.sql.exec(`SELECT 1 FROM ${table} LIMIT 1`).toArray().length, 'restore_requires_empty_target');
-  }
-  private ready(hash: string) {
-    const s = this.session(); check(s && s.cluster === hash && ['restored', 'released'].includes(s.phase), 'cluster_member_not_restored');
-    return s;
-  }
-  clusterCut(epoch: string, hash: string) {
-    const s = this.ready(hash); check(u64(epoch) <= u64(s.header.epoch), 'archive_future_fact');
-    return this.header(epoch);
-  }
-  async clusterReady(hash: string) {
-    const s = this.ready(hash), plan = await this.cluster!.plan(hash), name = s.header.control.partition!.shard;
-    check(same(plan.finals[name], { header: s.header, footer: s.footer }), 'cluster_restore_target');
-    return { done: s.checked === s.header.control.position };
-  }
-  async clusterFact(path: string, hash: string): Promise<PositionedFact> {
-    const s = this.ready(hash), p = s.header.control.partition!;
-    check(await shardFor(p.topology, path) === p.shard, 'wrong_shard');
-    const row = this.existing(path, orderedU64(s.header.epoch));
-    const position = this.db.sql.exec<{position:string}>("SELECT position FROM journal WHERE kind='results' AND key=?", path).toArray()[0]?.position;
-    check(position && position <= orderedU64(s.header.control.position), 'archive_missing_result');
-    await this.ctx.storage.sync(); return { fact: fact(row), position, journal: s.header.control.journal };
-  }
-  clusterPolicy(position: string, hash: string) {
-    const s = this.ready(hash), p = s.header.control.partition!;
-    check(p.shard === Object.keys(p.topology.shards).sort()[0], 'policy_authority_required');
-    const row = this.db.sql.exec<PolicyChange>('SELECT * FROM moderation WHERE position=?', position).toArray()[0];
-    check(row, 'archive_missing_policy'); return row;
-  }
-  async clusterVerify(hash: string) {
-    const s = this.ready(hash); await this.clusterReady(hash);
-    check(s.phase === 'restored', 'cluster_already_released');
-    const plan = await this.cluster!.plan(hash), p = s.header.control.partition!;
-    const rows = this.db.sql.exec<ChangeIndex>(
-      'SELECT * FROM journal WHERE position>? AND position<=? ORDER BY position LIMIT ?',
-      orderedU64(s.checked), orderedU64(s.header.control.position), PAGE_SIZE).toArray();
-    for (const item of rows) {
-      const existing = async (path: string, epoch: string): Promise<Fact> => {
-        const name = await shardFor(p.topology, path);
-        const found = name === p.shard ? await this.clusterFact(path, hash) : await this.cluster!.fact(path, hash);
-        check(found.journal === plan.boundary.cuts[name]!.control.journal
-          && found.fact.path === path && found.fact.epoch <= epoch
-          && found.position <= orderedU64(plan.boundary.cuts[name]!.control.position), 'archive_dependency_cut');
-        if (name === p.shard) check(found.position < item.position, 'archive_dependency_order');
-        return found.fact;
-      };
-      if (item.kind === 'results') {
-        const row = this.db.result(item.key); check(row, 'archive_missing_result');
-        await checkResultLinks(row, s.header.control.origin, path => existing(path, row.epoch));
-      } else if (item.kind === 'moderation') {
-        const row = this.db.sql.exec<PolicyChange>('SELECT * FROM moderation WHERE position=?', item.key).one();
-        const authority = Object.keys(p.topology.shards).sort()[0]!;
-        if (p.shard !== authority) check(same(row, await this.cluster!.policy(row.position, hash)), 'archive_policy_conflict');
-        // A follower can have applied policy before its local dependency; only the authority needs earlier local order.
-        if (p.shard === authority && parseReference(row.path).kind !== 'sea') await existing(row.path, row.epoch);
-      }
-    }
-    if (rows.length) { s.checked = String(BigInt(rows.at(-1)!.position)); this.save(s); }
-    await this.ctx.storage.sync(); return { after: s.checked, done: s.checked === s.header.control.position };
-  }
-  async clusterRelease(hash: string, plan: ClusterPlan) {
-    const s = this.ready(hash); check(s.checked === s.header.control.position, 'cluster_restore_not_verified');
-    check(same(plan.finals[s.header.control.partition!.shard], {header:s.header, footer:s.footer}), 'cluster_restore_target');
-    if (s.phase === 'released') { await this.ctx.storage.sync(); return this.status(); }
-    const manifestHash = await digest(canonical(plan.boundary));
-    this.ctx.storage.transactionSync(() => {
-      const c = this.db.control(), b = c.barrier!;
-      check(b.id === plan.boundary.id && b.epoch === plan.boundary.epoch && b.phase === 'held', 'barrier_conflict');
-      const released = { ...b, phase: 'released' as const, manifest: manifestHash };
-      barrierTransition(b, released, c.epoch); c.barrier = released;
-      this.db.record(c, 'barrier', canonical(released));
-      if (!s.header.control.paused) this.db.record(c, 'pause', '1');
-      this.db.save(c); s.phase = 'released'; this.save(s);
-    });
-    await this.ctx.storage.sync(); return this.status();
-  }
-
 }

@@ -1,173 +1,166 @@
 # Whole-core recovery
 
-The native core exports coherent SQLite/R2 snapshots and incremental suffixes,
-then restores them into an empty, quarantined target. This is an operator
-facility; [HTTP.md](HTTP.md) describes authentication. Never expose the local or
-test adapters on a public Worker. Nothing here deploys or schedules a backup.
+The native core exports a committed prefix of its SQLite metadata and the
+immutable R2 bodies accepted within it. Full and incremental copies share one
+format and restore into an empty, quarantined target. Capturing a checkpoint is
+read-only: publishing continues throughout the copy. There are no epochs, stored
+cuts or global barriers in the active core.
 
 ```sh
 npm run demo:recovery                    # Real local SQLite/R2 loss drill.
 npm run demo:recovery -- ./garden.jsonl  # Keep an archive at a new path.
 npm run verify:recovery -- ./garden.jsonl --chain SHA256_PRINTED_BY_BACKUP
-npm run test:recovery                    # Includes full + two-delta loss/restart drill.
+npm run test:recovery                    # Full + delta loss/restart and corruption cases.
 ```
 
-Node 24 is required. Offline verification and authenticated backup/restore clients
-need no Cloudflare runtime. The local drill/tests also need workerd. They create
-fresh development keys and disposable local storage, then check exact receipts,
-signatures, times, bodies, policy, accounting and continued numbering.
+Node 24 is required. Offline verification and authenticated clients need no
+Cloudflare runtime. Local drills/tests also need workerd. Nothing here deploys
+or schedules a backup. Never expose privileged test adapters publicly.
 
-## The boundary and the copy
+## Capture once, copy at any pace
 
-`cut()` saves bounded control state and policy at epoch N and advances to N+1
-in one synchronous SQL transaction. It includes its own recovery position.
-There is no R2 I/O, history scan or wait for uploads in that transaction. Success
-waits for durability. This is one coordinator's cut, not a distributed snapshot.
+`checkpoint()` synchronously reads the bounded control row, policy and capture
+time, then waits for `storage.sync()` before returning that header. It performs
+no SQL mutation, R2 I/O or history scan and does not wait for pending uploads.
+The header pins the journal identity and inclusive position P. Keep the returned
+header on the client; the server does not store checkpoint rows.
 
-A small `journal` index orders pointers to immutable facts. Each fact, pointer
-and position commits together. Pause/unpause is a small inline fact. No source
-or message body is duplicated in this live index. GETs, rejected attempts and
-exact retries create no journal entry. Attempt-credit decrements need not be
-replayed: restoration resets all spendable credits to zero. Cuts preserve their
-historical bucket values. [INCREMENTAL.md](INCREMENTAL.md) records the design.
+The `journal` orders pointers to immutable source reservations, accepted results
+and moderation decisions; pause/unpause is a small inline fact. Each fact,
+pointer and position commits together. It duplicates no payload. The result
+row includes its original receipt, signature evidence and submission time, so
+this feed indexes every accepted object, not just source blobs. `heads` is
+reconstructed from numbered results. Gaps remain gaps. Any future allocator that
+reserves numbers without results must journal that reservation too.
 
-A full archive starts at position zero. A delta starts after an earlier cut and
-binds that cut, its journal identity and the preceding archive digest. Both end
-at a closed cut, regardless of later writes. A source reserved before the cut
-but published afterward appears as a bodyless reservation in the earlier file;
-its exact body accompanies the acceptance in the later file. Slow or ambiguous
-PUTs therefore do not delay the cut or leak later publication into it.
+Pages query only `after < position <= P` in the pinned journal. A new write cannot
+lengthen the scan. Every accepted source points to R2 bytes whose conditional PUT
+completed before its SQL acceptance. Hash-addressed bodies and historical rows
+remain immutable, so a later copy still represents the captured prefix.
+A paid reservation before P needs no unpublished body; if it commits after P,
+its body accompanies the result in a later increment. Failed/abandoned uploads
+remain paid and can be retried without a new reservation.
 
-Export examines at most 32 journal positions per response, with a soft 512 KiB
-encoded-response budget (one larger bounded record is allowed). At most two
-exports can be in flight. Source acceptance costs one verified R2 GET; other
-facts need none. A delta does not reread bodies accepted before its base cut.
-There is no history scan in the coordinator, and normal source POST still uses
-one R2 PUT. Restore normally PUTs each accepted source once with its digest
-checksum; an ambiguous-write retry may add a GET to verify existing bytes.
+Attempt debits, exact retries and reads add no journal fact. The header preserves
+historical quota state; recovery zeros spendable credit rather than replaying
+individual admission decrements. A checkpoint at the same journal position can
+therefore have different operating credits or capture time. Empty full copies
+and empty increments are valid.
 
-The format is canonical JSON Lines, `sprig-native-snapshot/6`: header, records
-in contiguous recovery-position order, then count and SHA-256 chain. The header
-contains `base: null` for a full snapshot, or `{chain, cut}` for a delta. Every
-record has a padded u64 `position`. The maximum physical line is 2 MiB, allowing
-escaped UTF-8. Large counters stay decimal text. Output is exclusive and fsynced;
-an existing backup is never overwritten.
+Export examines at most 32 positions per response with a soft 512 KiB encoded
+budget; one larger bounded record is allowed. At most two exports run at once.
+Each included source body needs one verified R2 GET. Metadata/inline facts need
+none; increments do not reread earlier accepted sources. Normal source POST still
+costs one R2 PUT. Restore normally PUTs each accepted source once; an ambiguous
+write retry may add a verification GET.
 
-| Fact | Archive representation | Recovery purpose |
-| --- | --- | --- |
-| Source reservation | Size, debit, reservation epoch and time | Abandoned uploads remain paid |
-| Result | Exact action, signature evidence, placement, receipt, acceptance time/epoch and debit | Preserve first publication, consumed actions and collection numbers |
-| Published source | Exact UTF-8 body alongside its result | Verify hash/size; omit unaccepted private bytes |
-| Moderation | Ordered hide/block decisions, including original issue epoch/time | Preserve policy and delayed delivery order |
-| Pause | Boolean control fact | Reconstruct pause state at each cut |
-| Cut | Original control, policy and time | Validate counters, epoch and closed position |
+## One portable stream
 
-Late policy delivery cannot enter a closed journal prefix, even if its issue
-epoch is older. `heads` is rebuilt from committed numbered results. Gaps remain
-gaps. A future allocator that reserves numbers without results must journal
-those reservations before that behavior ships. There is no public global order.
+Canonical JSON Lines, `sprig-native-snapshot/7`: header, contiguous journal facts,
+then count and SHA-256 chain. Full copies start at position zero with `base: null`.
+Increments bind `{chain, checkpoint}` from the exact predecessor, including its
+journal identity, control and policy. They may start from another increment.
+Counters use decimal text, record positions use padded u64 text, and each
+physical line is bounded to 2 MiB. Output is exclusive, mode 0600 and fsynced.
 
-No physical deletion or cut-release facility exists yet. Every cut remains
-exportable while its accepted bytes exist. Future deletion must respect backup
-pins/retention and suppression policy. Backups contain suppressed accepted data;
-protect them accordingly. Unaccepted private bytes need not be copied; their
-reservation survives without a refund so a retry can upload them again.
+| Record | Retained information |
+| --- | --- |
+| Source reservation | Address, size, debit and reservation time; no body |
+| Accepted result | Placement, exact action, receipt, signature evidence, acceptance time and debit; source body when applicable |
+| Moderation | Contiguous hide/block decisions and submission time |
+| Pause | Boolean control transition |
 
-## Capturing and restoring a chain
+At the end, replayed counters, position and pause state must match the header.
+There is no final cut record. Backups include suppressed content and need
+appropriate custody. Physical deletion/GC is not implemented: future deletion
+must account for outstanding copies and the chosen backup-retention policy.
+Unaccepted R2 bytes do not belong to the recoverable public history.
 
-[OPERATIONS.md](OPERATIONS.md) provides the backup credential, witness custody and
-commands for full and incremental capture. Keep the final trusted witness under
-independent custody. A checksum beside a modified file is not authenticity.
+## Capturing and restoring
 
-With `SPRIG_ADMIN_TOKEN` supplied privately, and the target configured with
-`CORE_RESTORE_MODE=1`, restore a full file and all successive increments:
+[OPERATIONS.md](OPERATIONS.md) covers the read-only backup credential and witness
+custody. Keep the trusted final digest independently from the archives and
+primary service. An adjacent checksum alone is not authenticity.
+
+With `SPRIG_ADMIN_TOKEN` supplied privately and the routed target configured with
+`CORE_RESTORE_MODE=1`, restore a full copy and every successive increment:
 
 ```sh
 node core/scripts/recover.mjs restore https://sprig.run --chain TRUSTED_FINAL_SHA256 \
   /backups/full.jsonl /backups/delta-1.jsonl /backups/delta-2.jsonl
 ```
 
-Use a routed recovery target for that canonical origin; stop/fence the old writer
-before reopening. The command verifies every file, base cut and digest link before
-mutating the target. It pins the final digest for the whole plan, resumes after
-restart, and **does not release quarantine**. A plan currently allows at most
-1,024 files; take periodic full snapshots or use larger incremental intervals.
+The client verifies all files and exact base/digest links before mutating the
+target. It pins the final digest, resumes after interruption and leaves quarantine
+in place. A plan is bounded to 1,024 files; take periodic full copies.
 
 Programmatic helpers in `scripts/recover.mjs` accept local or authenticated RPC:
 
-- `backup(core, file, epoch?)`: full copy of a new or existing cut.
-- `incrementalBackup(core, file, baseFile, baseChain, epoch?)`: copy after the
-  independently verified predecessor; the predecessor can itself be a delta.
-- `verifyChain(files, finalChain)`: offline framing, source hashes, accounting and
-  complete digest/cut linkage. Returns checked headers/footers, not all bodies.
-- `restoreChain(core, files, finalChain)`: preflight the plan, import or resume it.
-- `prepareRestoreChain(files, finalChain)`: preflight once and return checked
-  final descriptors plus `restore(core)`. Cluster recovery reuses this plan
-  after preflighting all members, without rescanning each complete chain.
+- `backup(core, file, checkpoint?)`: copy a new or previously captured header.
+- `incrementalBackup(core, file, baseFile, baseChain, checkpoint?)`: copy only
+  the suffix after an independently verified predecessor.
+- `verifyChain(files, finalChain)`: verify framing, bodies, accounting and links.
+- `restoreChain(core, files, finalChain)`: preflight, then import or resume.
+- `prepareRestoreChain(files, finalChain)`: preflight once and return bounded
+  descriptors plus `restore(core)`; import still checks bytes and digests.
 - `restore(core, file, fileChain, finalChain = fileChain)`: import one segment;
-  supply the final target when more segments must follow.
+  pin the ultimate target when more segments must follow.
 
-The first segment requires matching origin/policy, an empty database and an empty
-private R2 bucket. A durable quarantine marker precedes the bucket inspection.
-Normal reads, submissions, moderation, cuts and unpause are blocked by both the
-environment setting and persistent quarantine. Dropping the setting early cannot
-expose partial history.
+The first segment requires matching origin/policy, empty SQLite and an empty
+private R2 bucket. A persistent quarantine marker precedes bucket inspection.
+Normal reads, publishing, moderation, checkpoints and unpause are blocked by both
+the environment fence and that marker. Dropping the flag early cannot expose
+partial history.
 
-Records are imported in dependency order. Each result verifies its action ID,
-receipt, retained key/plot authority, signature and referenced predecessors before
-its SQL insertion. Each imported fact, journal pointer and resume cursor commits
-together. Only an identical retry of the last imported record is accepted.
-Source hashes/lengths are checked before conditional R2 PUT. Failed PUTs and lost
-acknowledgements are resumable; they cannot duplicate accepted history or debit.
-Prepared plans retain no bodies and never replace the target's record/hash,
-authority or final-digest checks. Import rechecks framing, footer and record count;
-changed bytes after preflight cannot authorize different history.
+Each result verifies its action ID, receipt, signature, key/plot authority and
+already imported dependencies. Each fact, journal pointer and resume cursor
+commits together. Only the identical last-record retry is accepted. Bodies are
+hash/length checked before conditional PUT. Lost replies, failed PUTs and restart
+cannot duplicate accepted history or debit. Changing an archive after preflight
+cannot authorize different history.
 
-`restoreFinish()` validates the completed segment in constant work. An earlier
-segment enters `awaiting_delta`; only the pinned final digest enters `restored`.
-A later header must match the exact previous cut and footer. The target digest
-cannot be weakened mid-import. Gaps, reordered/duplicate records, foreign lineage,
-truncation, broken dependencies, invalid signatures or accounting mismatches
-cannot complete recovery. The old separate `verifying` phase and temporary source
-validation table are gone.
+`restoreFinish()` checks the completed segment in constant work. Earlier segments
+enter `awaiting_delta`; only the pinned final digest enters `restored`. Completion
+preserves original numbers, times, receipts and counters, pauses writes and zeros
+spendable growth/burst/attempt credits. Release requires the final digest and
+`history-reconciled`, then separate removal of restore mode and explicit unpause.
+The forced pause becomes a new journal fact only on release, after the trusted
+suffix, so it cannot consume a position needed by a later imported segment.
 
-Completion restores history and counters at N+1, pauses writes and zeros growth,
-burst and attempt credits. Historical credit remains in the cut. Release requires
-the final digest and `history-reconciled` assertion, then separate removal of
-restore mode and explicit unpause. A forced pause becomes a new journal fact
-only on release, after the complete trusted suffix, so it cannot occupy positions
-needed by later imports. Repeated finish/release does not reset or duplicate state.
+## What asynchronous backup promises
 
-## The unknown suffix still matters
+A successful copy recovers its entire captured prefix, including accepted R2
+bodies. It does not prove that no later acknowledgements exist. Before reopening
+the same numbered namespace, fence the old writer and reconcile any later
+allocations, consumed actions and takedowns. Otherwise names could be reused or
+signatures replayed. Keep an uncertain target quarantined; the release assertion
+is an operator responsibility, not an automated proof of suffix completeness.
 
-A complete supplied chain does not prove there were no later writes. The client
-can detect a missing segment relative to the pinned final digest; it cannot find
-an unknown later tip. Before reopening the same namespace, fence the old writer
-and establish that the trusted final cut includes every accepted action,
-allocation and policy decision. Otherwise old names could be reused, signatures
-replayed or takedowns undone. If trusted suffix evidence is unavailable, leave
-the target quarantined. The release assertion is an operator responsibility,
-not an automated proof about the original service.
+Cloudflare SQLite point-in-time recovery does not by itself recover R2 bodies or
+provide an independent backup. Litestream needs access to SQLite/WAL files, which
+this Durable Object adapter does not expose. The logical feed is our portable
+backup boundary; no WAL shipper or continuous replica is installed.
 
-Public routing still uses one physical coordinator. [CLUSTER.md](CLUSTER.md)
-describes fixed placement, the global barrier and coordinated cluster recovery.
-Partitioned imports require a pinned cluster plan; individual release is refused.
-The shared bucket is checked once cluster-wide, and remote dependencies are
-validated only after every member reaches its final trusted digest.
+Future shards may capture and recover independently, with weaker cross-shard
+consistency. References across them may temporarily be unresolved. Relationships
+that require an atomic commit should share a shard. Placement, reconciliation
+and writer fencing will need design when sharding is implemented; a global
+snapshot barrier is **not** a retained requirement.
 
-## Schema 6 transition (before deployment)
+## Schema 7 transition (before deployment)
 
-This uses database schema 6, archive `sprig-native-snapshot/6`, and backup witness
-`sprig-backup-witness/2`. Old database schemas fail before mutation. Old archives
-fail with `archive_version`; old witnesses are not silently converted. No local
-data is deleted or migrated. Public signed formats and receipts stay version 1.
+Database schema 7, archive `sprig-native-snapshot/7`, witness
+`sprig-backup-witness/3`. Old schemas are refused before mutation; old archives
+fail with `archive_version`. No state is deleted, migrated or silently converted.
+Public signed formats and receipts remain version 1.
 
-Preserve an old state directory/archive. To try this core explicitly:
+Preserve old local state and explicitly choose a fresh directory:
 
 ```sh
-npm run dev:core -- --state .local/native-http-v6 --operator
+npm run dev:core -- --state .local/native-http-v7 --operator
 ```
 
-Use a separate checkout of `d301321b2fb3c70c63460f08506841eee3b23bd1`
-(PR #23), including its lockfile, to read schema/archive 5. There is no production
-migration yet and this change includes no conversion tool.
+The complete epoch/cluster implementation, tests and schema-6 reader are preserved
+on [reference/epoch-core-2026-11-05](https://github.com/nickjhay/sprigrun/tree/reference/epoch-core-2026-11-05)
+at `c2c2ad7b7ffd62552039cc39395df0744654e714`. Use that checkout and lockfile to
+read earlier data. There is no deployed-data migration or conversion tool.

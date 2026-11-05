@@ -36,7 +36,7 @@ transaction writes:
 
 - the unique action ID and original signature/evidence;
 - one result row, plus the next collection number and head for an append;
-- the acceptance timestamp and snapshot epoch;
+- the acceptance timestamp;
 - the metadata growth debit, receipt and recovery journal pointer;
 - first publication of a prepared source, when applicable.
 
@@ -122,24 +122,19 @@ and no R2 reads. Do not expose privileged methods through a generic RPC router.
 
 ## Snapshot boundary and recovery
 
-`cut()` saves the small control state at epoch N and advances to N+1 in one
-transaction. It does not acquire a preparation lock or await R2. A PUT already
-in flight can finish after the cut, but its publication and receipt belong to
-N+1. The retained reservation records when private allowance was paid; publication
-records when the value became public. Tests hold an actual R2 PUT while making
-the cut. There is no claim about a particular production latency yet.
+`checkpoint()` synchronously captures control, policy, journal identity and
+position, then waits for durability. It does not mutate SQL or wait for uploads.
+Pages copy immutable facts only through the captured position while publishing
+continues. A source reservation appears without a body until its acceptance;
+a later increment carries that body's exact bytes. Tests hold an R2 PUT while
+capturing and restoring both sides of this boundary.
 
-Committed results, moderation changes and cuts retain their epochs. Sources
-retain only preparation facts; the result row supplies the publication epoch/time.
-Full and incremental exports follow the same bounded journal stream. Exact source
-bytes accompany acceptance; preparations carry no body. The restore target checks
-each result and its already imported predecessors, then rebuilds heads while
-quarantined. Fact, journal pointer and resume cursor commit together. A missing
-suffix cannot release a restore plan pinned to a later digest. Original
-credits remain historical, while spendable credits reset to zero. See the
-[recovery guide](../RECOVERY.md) for the format, loss drill and release boundary.
-Physical deletion and pin release are not implemented. Do not use the old
-source-store recovery tool on this schema.
+Full and incremental copies share one bounded stream. Restore validates each
+result and its prior dependencies, rebuilds heads and commits each fact with its
+resume cursor under quarantine. Historical counters and receipts survive;
+spendable credits reset to zero. See [RECOVERY.md](../RECOVERY.md) for the format,
+loss drill, release boundary and schema-7 transition. Physical deletion/GC is
+not implemented. Do not use the older source-store recovery tool on this schema.
 
 An old backup cannot reveal its unknown suffix. Recovering to the same public
 origin requires reconciling allocation/consumption/suppression high-water marks
@@ -158,52 +153,27 @@ The transaction API follows Cloudflare's
 Tests inject faults into this implementation, rather than maintaining an
 independent in-memory acceptance model.
 
-## Logical owners and eventual policy
+## Logical owners and local policy
 
 `placement.owner()` maps source values to their `/sea/H_L` identity and numbered
-results to their allocation collection. `/receipt`, `/action` and `/evidence`
-map to the same owner as their result. `POST /sea` has no owner until bounded
-intake and hashing have identified the value. Public identities contain no
-physical shard ID. All owners still use the single `core` Durable Object.
+results to their allocation collection. Receipt, action and evidence mirrors
+have that same owner. `POST /sea` gets an owner after bounded intake/hashing.
+Public identifiers contain no physical shard ID; all owners currently use the
+single `core` Durable Object.
 
-`moderation` contains ordered `hide` and `block` facts. The control count is
-advanced in the same transaction; repeated unchanged decisions add nothing.
-An index on effect/path/position supplies current decisions without a duplicate
-mutable projection table. A snapshot captures the applied position as well as the epoch. Late catch-up
-with an older policy issue epoch cannot enter that already closed prefix.
-Ordinary single-shard GETs do not write policy state. Cluster reads can trigger
-a bounded policy catch-up; the history remains operator-controlled.
-
-The local authority applies changes immediately. In the local cluster,
-`PolicyFollower` pulls from the fixed first member: at most 32 changes per tick,
-a 60-second refresh/backoff target, coalesced concurrent refreshes, and a durable
-cursor supplied by the journal. Reads/writes drive catch-up; there is no alarm
-or hard convergence deadline. Stale policy can admit an action; a later content
-hide cleans it up without rewriting its receipt. This is not instantaneous key
-revocation. Public HTTP still uses one local authority.
-
-A follower applies changes and its cursor in one transaction, then syncs before
-acknowledging. Gaps, conflicting duplicates, future/backwards epochs and invalid
-schemas fail. Identical delayed delivery never rewinds a decision. The policy
-cursor is internal; it is not a global order of public submissions. The operator
-feed and status are available at `/admin/policy?after=0`.
-Follower status includes the durable applied position and ephemeral refresh
-diagnostics: busy, last attempt/success time, last error stage and last observed
-authority position. Successful refresh time records completion, including a
-partial batch; compare applied/observed positions for remaining known backlog.
-Errors are fixed codes (`pull_failed`, `invalid_page`, `apply_failed`), never raw
-provider details. Diagnostics reset to unknown on restart, add no durable writes
-and do not claim policy is current while the authority is unreachable.
+`moderation` retains ordered hide/block facts. Its control count and journal
+pointer commit together. An index supplies the latest decision without a second
+mutable projection. Repeating an unchanged decision adds nothing. The local
+authority applies changes immediately; reads need no poller or durable write.
+The bounded operator feed/status is `/admin/policy?after=0`.
 
 `requiredReferences` describes retained authority, visible values/subjects and
-anchors for both live admission and historical recovery. Live admission checks
-current visibility and append authority; recovery checks accepted historical
-dependencies. A later hide or key block does not invalidate an earlier signature.
+anchors for both admission and recovery. Live admission checks current visibility
+and append authority; recovery checks historical dependencies. A later hide or
+key block does not invalidate an earlier signature.
 
-## Fixed-roster barrier laboratory
-
-[BARRIER.md](../BARRIER.md) adds immutable partition bindings, exact divided budgets
-and a durable hold/cut/publish/release protocol. [CLUSTER.md](../CLUSTER.md) adds
-fixed physical placement, registered cross-owner facts, policy followers and
-coordinated full/incremental restore. Public HTTP remains single-shard pending
-metered ingress, routing and aggregate/operator views.
+Future shards may have weaker cross-shard consistency and independent backups.
+Colocate relationships requiring atomicity when choosing placement. There is no
+global barrier requirement or active topology/follower implementation. The earlier
+cluster design and its failure tests are preserved on
+[reference/epoch-core-2026-11-05](https://github.com/nickjhay/sprigrun/tree/reference/epoch-core-2026-11-05).

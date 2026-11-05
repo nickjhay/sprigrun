@@ -1,14 +1,13 @@
 # Sprig native core
 
-3 November 2026. Executable protocol groundwork for the new public service at
+5 November 2026. Executable protocol groundwork for the new public service at
 `https://sprig.run`. The protocol and [SQLite/R2 acceptance layer](host/README.md)
 and [full/incremental recovery](RECOVERY.md) are implemented and tested locally.
 The [public HTTP adapter and linked explorer](HTTP.md) are implemented locally;
 deployment remains ahead.
-The first public preview will use that single-shard adapter. The two-member
-barrier/recovery laboratory remains tested; sharded public HTTP and collection
-movement are not launch prerequisites. Finish independent backup custody, a
-recovery-loss policy and an operator rehearsal before opening public writes.
+The first public preview uses one metadata database and read-only committed-prefix
+backups. Future shards may have weaker cross-shard consistency; colocate atomic
+relationships later. Epochs and the global barrier are removed from active code. Finish independent backup custody, a recovery-loss policy and an operator rehearsal before opening public writes.
 The running workbench/store/channels are unchanged;
 the older implementation is preserved on
 [reference/pre-native-core-2026-11-02](https://github.com/nickjhay/sprigrun/tree/reference/pre-native-core-2026-11-02).
@@ -33,7 +32,7 @@ still work without it.
 
 - [OPERATIONS.md](OPERATIONS.md): independent backups, local rehearsal and editable costs.
 - [PROTOCOL.md](PROTOCOL.md): normative candidate v1 bytes, references and errors.
-- [host/README.md#logical-owners-and-eventual-policy](host/README.md#logical-owners-and-eventual-policy): collection ownership and independent hide/block policies.
+- [host/README.md#logical-owners-and-local-policy](host/README.md#logical-owners-and-local-policy): collection ownership and independent hide/block policies.
 - [INVARIANTS.md](INVARIANTS.md): proof obligations, trust boundaries and next steps.
 - [seed/README.md](seed/README.md): contents we can carry into the public commons.
 
@@ -75,7 +74,6 @@ http://127.0.0.1:8789/, with a small planting installed through normal HTTP
 admission. This needs a supported workerd platform. `npm run test:http` covers
 the public and authenticated operator transports; it is included in `check`.
 
-The two-participant snapshot barrier has a local restart drill: `npm run demo:barrier`.
-See [the barrier guide](BARRIER.md) for implemented invariants and the remaining sharding work.
-
-[Cross-owner recovery](CLUSTER.md) now has a local signed-garden loss drill: `npm run demo:cluster`. Public serving remains single-shard.
+Backups now copy a committed journal prefix without pausing writes or storing
+snapshot epochs. The previous barrier/cluster implementation and tests remain on
+[reference/epoch-core-2026-11-05](https://github.com/nickjhay/sprigrun/tree/reference/epoch-core-2026-11-05).
