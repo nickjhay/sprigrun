@@ -134,7 +134,7 @@ export function failure(error: unknown): Response {
         status = 429;
         retry = 60;
     }
-    else if (['writes_paused', 'recovery_mode'].includes(code)) {
+    else if (['writes_paused', 'recovery_mode', 'barrier_held'].includes(code)) {
         status = 503;
         retry = 60;
     }
@@ -161,6 +161,7 @@ export function failure(error: unknown): Response {
         author_required: 'Plot allocation and plot publications require a signed action. See /help.',
         anchor_unavailable: 'Use an existing entry as the anchor, or append to the collection root.',
         recovery_mode: 'This target is quarantined for recovery.',
+        barrier_held: 'A snapshot boundary is being committed. Retry the same request shortly.',
         writes_paused: 'Publishing is temporarily paused.',
         invalid_utf8: 'Send valid UTF-8 bytes without changing their contents.',
         body_too_large: 'The request exceeds this operation’s byte limit. See /help.',

@@ -1,3 +1,6 @@
+import { partition, barrierState, barrierTransition, dividedPolicy, same, type BarrierState } from './topology.ts';
+import { canonical, fields } from './shape.ts';
+export { canonical, fields } from './shape.ts';
 // Portable logical archive contract. No SQL, R2 or HTTP implementation here.
 import { check, contentAddress, LIMITS, matches, nextU64, orderedU64, parseAddress,
   textBytes, u64 } from '../src/bytes.ts';
@@ -10,7 +13,7 @@ import { validateChange, type PolicyChange } from './moderation.ts';
 import { policy, type Policy } from './policy.ts';
 import type { Control, Result, Source } from './state.ts';
 
-export const FORMAT = 'sprig-native-snapshot/4';
+export const FORMAT = 'sprig-native-snapshot/5';
 export const MAX_LINE = 2 * 1024 * 1024;
 export const PAGE_SIZE = 32;
 export const TABLES = ['sources', 'results', 'moderation', 'cuts'] as const;
@@ -21,17 +24,12 @@ export type Header = { type: 'header'; format: typeof FORMAT; epoch: string; cap
 export type Record = ({ type: 'sources'; row: Source }
   | { type: 'results'; row: Result; body: string | null }
   | { type: 'moderation'; row: PolicyChange } | { type: 'cuts'; row: Cut }
-  | { type: 'pause'; paused: boolean }) & { position: string };
+  | { type: 'pause'; paused: boolean } | { type: 'barrier'; state: BarrierState }) & { position: string };
 export type End = { type: 'end'; count: string; chain: string };
 export type Progress = { count: string; chain: string; position: string;
   moderation: string; accepted: string; debit: string; reserved: string;
-  epoch: string; paused: boolean; atCut: boolean };
+  epoch: string; paused: boolean; barrier: BarrierState | null; atCut: boolean };
 
-export function fields(value: unknown, names: readonly string[]): asserts value is { [key: string]: any } {
-  check(value !== null && typeof value === 'object' && !Array.isArray(value), 'archive_fields');
-  const keys = Object.keys(value);
-  check(keys.length === names.length && names.every(k => Object.hasOwn(value, k)), 'archive_fields');
-}
 function integer(x: unknown, positive = false): asserts x is number {
   check(typeof x === 'number' && Number.isSafeInteger(x) && x >= (positive ? 1 : 0), 'archive_integer');
 }
@@ -41,16 +39,6 @@ function padded(x: unknown): asserts x is string {
 }
 function smallText(x: unknown, max: number): asserts x is string {
   check(typeof x === 'string' && x.length <= max && textBytes(x).length <= max, 'archive_text');
-}
-export function canonical(value: unknown): string {
-  function sorted(v: any): any {
-    if (v !== null && typeof v === 'object') {
-      check(!Array.isArray(v), 'archive_array');
-      return Object.fromEntries(Object.keys(v).sort().map(k => [k, sorted(v[k])]));
-    }
-    return v;
-  }
-  return JSON.stringify(sorted(value));
 }
 export function parseLine(line: string): unknown {
   smallText(line, MAX_LINE);
@@ -70,8 +58,10 @@ export function validatePolicy(value: unknown): Policy {
   return policy(value as Policy);
 }
 export function validateControl(value: unknown): Control {
-  fields(value, ['schema', 'origin', 'journal', 'position', 'epoch', 'paused', 'growth', 'burst', 'attempts', 'moderation', 'accepted', 'reservedBytes', 'acceptedDebit']);
-  check(value.schema === 4 && typeof value.paused === 'boolean', 'archive_control');
+  fields(value, ['schema', 'partition', 'barrier', 'origin', 'journal', 'position', 'epoch', 'paused', 'growth', 'burst', 'attempts', 'moderation', 'accepted', 'reservedBytes', 'acceptedDebit']);
+  check(value.schema === 5 && typeof value.paused === 'boolean', 'archive_control');
+  partition(value.partition); barrierState(value.barrier);
+  check(value.partition !== null || value.barrier === null, 'archive_partition');
   check(matches(/^[0-9a-f]{32}$/, value.journal), 'archive_journal');
   u64(value.position); canonicalOrigin(value.origin); u64(value.epoch); u64(value.accepted); u64(value.moderation);
   decimal(value.reservedBytes); decimal(value.acceptedDebit);
@@ -87,11 +77,14 @@ export function validateHeader(value: unknown): Header {
   check(value.type === 'header', 'archive_version');
   u64(value.epoch); nextU64(value.epoch); u64(value.capturedAtMs);
   const c = validateControl(value.control), p = validatePolicy(value.policy);
+  if (c.partition !== null) check(c.origin === c.partition.topology.origin
+    && same(p, dividedPolicy(c.partition.topology, c.partition.shard))
+    && c.barrier?.phase === 'held' && c.barrier.epoch === value.epoch, 'archive_partition');
   check(c.epoch === value.epoch && u64(c.position) > 0n, 'archive_cut_mismatch');
   if (value.base !== null) {
     fields(value.base, ['chain', 'cut']); hash(value.base.chain);
     const base = cutHeader(value.base.cut);
-    check(base.control.origin === c.origin && base.control.journal === c.journal, 'archive_base_journal');
+    check(base.control.origin === c.origin && base.control.journal === c.journal && same(base.control.partition, c.partition), 'archive_base_journal');
     check(canonical(base.policy) === canonical(p), 'archive_base_policy');
     check(u64(base.epoch) < u64(c.epoch) && u64(base.control.position) < u64(c.position), 'archive_base_order');
   }
@@ -116,6 +109,7 @@ export function end(value: unknown): End {
 export function recordKey(record: Record): string {
   switch (record.type) {
     case 'pause': return record.paused ? '1' : '0';
+    case 'barrier': return canonical(record.state);
     case 'sources': return record.row.address;
     case 'results': return record.row.path;
     case 'moderation': return record.row.position;
@@ -125,12 +119,13 @@ export function recordKey(record: Record): string {
 export async function validateRecord(value: unknown, h: Header): Promise<Record> {
   check(value !== null && typeof value === 'object', 'archive_record');
   const r = value as Record;
-  check(r.type === 'pause' || TABLES.includes(r.type), 'archive_record');
+  check(r.type === 'pause' || r.type === 'barrier' || TABLES.includes(r.type), 'archive_record');
   fields(r, r.type === 'results' ? ['type', 'position', 'row', 'body'] : r.type === 'pause'
-    ? ['type', 'position', 'paused'] : ['type', 'position', 'row']);
+    ? ['type', 'position', 'paused'] : r.type === 'barrier' ? ['type', 'position', 'state'] : ['type', 'position', 'row']);
   padded(r.position);
   check(BigInt(r.position) > 0n && r.position <= orderedU64(h.control.position), 'archive_position');
   if (r.type === 'pause') { check(typeof r.paused === 'boolean', 'archive_pause'); return r; }
+  if (r.type === 'barrier') { check(h.control.partition !== null && barrierState(r.state) !== null, 'archive_barrier'); return r; }
   const row = r.row;
   if (r.type === 'sources') {
     const s = r.row;
@@ -181,7 +176,7 @@ export async function validateRecord(value: unknown, h: Header): Promise<Record>
     check(r.row.position <= orderedU64(h.control.moderation), 'archive_future_policy');
   } else {
     const old = cutHeader(r.row);
-    check(old.control.origin === h.control.origin && old.control.journal === h.control.journal, 'archive_origin');
+    check(old.control.origin === h.control.origin && old.control.journal === h.control.journal && same(old.control.partition, h.control.partition), 'archive_origin');
     check(canonical(old.policy) === canonical(h.policy), 'archive_policy');
     check(old.control.position === String(BigInt(r.position)), 'archive_cut_position');
     if (r.position === orderedU64(h.control.position))
@@ -197,16 +192,18 @@ export async function initial(h: Header): Promise<Progress> {
   return { count: '0', chain: await digest(canonical(h)), position: c?.position ?? '0',
     moderation: c?.moderation ?? '0', accepted: c?.accepted ?? '0', debit: c?.acceptedDebit ?? '0',
     reserved: c?.reservedBytes ?? '0', epoch: c === null ? '0' : nextU64(c.epoch),
-    paused: c?.paused ?? false, atCut: false };
+    paused: c?.paused ?? false, barrier: c?.barrier ?? null, atCut: false };
 }
 function accounting(p: Progress, c: Control) {
   check(p.position === c.position && p.moderation === c.moderation && p.accepted === c.accepted
-    && p.debit === c.acceptedDebit && p.reserved === c.reservedBytes && p.paused === c.paused, 'archive_accounting');
+    && p.debit === c.acceptedDebit && p.reserved === c.reservedBytes && p.paused === c.paused && same(p.barrier, c.barrier), 'archive_accounting');
 }
 export async function advance(p: Progress, r: Record, line: string): Promise<Progress> {
   check(r.position === orderedU64(nextU64(p.position)), 'archive_position_gap');
   const q = { ...p, count: nextU64(p.count), position: String(BigInt(r.position)),
     chain: await digest(p.chain + '\n' + line), atCut: false };
+  if (r.type === 'barrier') { barrierTransition(p.barrier, r.state, p.epoch); q.barrier = r.state; return q; }
+  check(p.barrier?.phase !== 'held' || r.type === 'cuts', 'archive_held_mutation');
   if (r.type === 'pause') { q.paused = r.paused; return q; }
   const epoch = r.type === 'sources' ? r.row.reserved_epoch : r.row.epoch;
   check(r.type === 'moderation' ? epoch <= orderedU64(p.epoch) : epoch === orderedU64(p.epoch), 'archive_fact_epoch');

@@ -70,3 +70,6 @@ Run `npm run dev:core -- --operator` for the native local service at
 http://127.0.0.1:8789/, with a small planting installed through normal HTTP
 admission. This needs a supported workerd platform. `npm run test:http` covers
 the public and authenticated operator transports; it is included in `check`.
+
+The two-participant snapshot barrier has a local restart drill: `npm run demo:barrier`.
+See [the barrier guide](BARRIER.md) for implemented invariants and the remaining sharding work.

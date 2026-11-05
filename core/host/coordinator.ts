@@ -1,3 +1,5 @@
+import { identifier, topology, dividedPolicy, barrierTransition, same, type Topology, type BarrierState } from './topology.ts';
+import { manifest, type NativeBarrier } from './barrier.ts';
 import { DurableObject } from 'cloudflare:workers';
 import { refill, waitSeconds } from '../../shared/bucket.ts';
 import { actionBytes, parseAction, type Action } from '../src/action.ts';
@@ -10,7 +12,7 @@ import { METADATA_ALLOWANCE, policy, type Policy } from './policy.ts';
 import { State, type Control, type Result } from './state.ts';
 import { collection, at, bodyValue } from './placement.ts';
 import { loadSource, putSource } from './objects.ts';
-import { canonical } from './archive.ts';
+import { canonical, digest, validateHeader } from './archive.ts';
 import { Recovery } from './recovery.ts';
 import { Inspection, type Browse } from './inspection.ts';
 import { Moderation, POLICY_BATCH, POLICY_REFRESH_MS } from './moderation.ts';
@@ -19,6 +21,7 @@ import { handleHttp } from '../http/routes.ts';
 import { body, httpPolicy, ReadGate, HttpError, uploadHeaders, urlFor, query, type HttpPolicy } from '../http/transport.ts';
 
 export interface Env {
+  CORE_TOPOLOGY?: Topology; CORE_BARRIER?: DurableObjectNamespace<NativeBarrier>;
   SOURCES: R2Bucket; CORE_ORIGIN: string; CORE_POLICY?: Policy; CORE_RESTORE_MODE?: string;
   CORE_HTTP_POLICY?: HttpPolicy; ADMIN_TOKEN?: string; BACKUP_TOKEN?: string; CORE_LOCAL_OPERATOR?: string; ABUSE_EMAIL?: string;
 }
@@ -35,6 +38,8 @@ export class NativeCoordinator extends DurableObject<Env> {
   protected readonly moderation: Moderation;
   private readonly origin: string;
   private active = 0;
+  private registered = false;
+  private readonly clustered: boolean;
   private readonly recovery: Recovery;
   private recovering = false;
   private exporting = 0;
@@ -46,8 +51,13 @@ export class NativeCoordinator extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.origin = canonicalOrigin(env.CORE_ORIGIN);
-    this.p = policy(env.CORE_POLICY);
-    this.db = new State(ctx.storage.sql, this.origin, this.p, Date.now());
+    const t = env.CORE_TOPOLOGY === undefined ? null : topology(env.CORE_TOPOLOGY);
+    this.clustered = t !== null;
+    const shard = ctx.id.name;
+    if (t) check(t.origin === this.origin && shard !== undefined && Object.hasOwn(t.shards, shard)
+      && env.CORE_BARRIER !== undefined && env.CORE_POLICY === undefined, 'invalid_partition_binding');
+    this.p = t ? dividedPolicy(t, shard!) : policy(env.CORE_POLICY);
+    this.db = new State(ctx.storage.sql, this.origin, this.p, Date.now(), t ? { topology: t, shard: shard! } : null);
     this.moderation = new Moderation(this.db);
     this.recovery = new Recovery(ctx, this.db, env.SOURCES, this.p);
     this.inspection = new Inspection(this.db, p => this.readable(p), id => this.actionRecord(id), this.origin);
@@ -55,6 +65,15 @@ export class NativeCoordinator extends DurableObject<Env> {
   }
   private normal() { check(this.env.CORE_RESTORE_MODE !== '1' && !this.recovery.locked(), 'recovery_mode'); }
   private transaction<T>(f: () => T): T { return this.ctx.storage.transactionSync(f); }
+  private async registration() {
+    if (!this.clustered || this.registered) return;
+    const c = this.db.control(); check(c.partition !== null, 'partition_required');
+    const registry = await this.env.CORE_BARRIER!.getByName('barrier').configuration();
+    check(registry && same(registry.topology, c.partition.topology)
+      && registry.journals[c.partition.shard] === c.journal, 'shard_not_registered');
+    this.registered = true; // Immutable registry; one trusted lookup per instance lifetime.
+  }
+  private mutable(c = this.db.control()) { check(c.barrier?.phase !== 'held', 'barrier_held'); }
   private refresh(c: Control) {
     const now = Date.now();
     c.growth = refill(c.growth, this.p.growth, now);
@@ -165,7 +184,7 @@ export class NativeCoordinator extends DurableObject<Env> {
   private async prepareSource(v: Verified) {
     const address = v.source!;
     this.transaction(() => {
-      const c = this.db.control(); check(!c.paused, 'writes_paused');
+      const c = this.db.control(); this.mutable(c); check(!c.paused, 'writes_paused');
       this.conditions(v); this.authorAllowed(v);
       if (this.db.source(address)) return;
       // Check room for acceptance too, but reserve only private bytes here.
@@ -201,8 +220,9 @@ export class NativeCoordinator extends DurableObject<Env> {
     this.normal(); check(this.active < 8, 'preparation_busy');
     this.active++;
     try {
+      await this.registration();
       this.transaction(() => {
-        const c = this.db.control(); check(!c.paused, 'writes_paused'); this.refresh(c);
+        const c = this.db.control(); this.mutable(c); check(!c.paused, 'writes_paused'); this.refresh(c);
         check(c.attempts.tokens >= 1, 'attempt_limit'); c.attempts.tokens--; this.db.save(c);
       });
       await this.ctx.storage.sync(); // No hashing, verification or R2 before admission is durable.
@@ -218,7 +238,7 @@ export class NativeCoordinator extends DurableObject<Env> {
       if (v.source !== null) await this.prepareSource(v);
       await this.prepared();
       const receipt = this.transaction(() => {
-        const c = this.db.control(); check(!c.paused, 'writes_paused');
+        const c = this.db.control(); this.mutable(c); check(!c.paused, 'writes_paused');
         this.conditions(v); // Recheck every mutable condition after all awaits.
         const prior = this.db.accepted(v.id);
         if (prior) { this.actionRecord(prior.path); return prior.receipt; }
@@ -370,6 +390,7 @@ export class NativeCoordinator extends DurableObject<Env> {
   }
   private async changePolicy(effect: 'hide' | 'block', path: string, active: boolean) {
     this.transaction(() => {
+      this.mutable();
       if (this.moderation.decision(effect, path)?.active === Number(active)) return;
       const c = this.db.control();
       this.moderation.apply([{ position: orderedU64(nextU64(c.moderation)), effect, path,
@@ -384,22 +405,77 @@ export class NativeCoordinator extends DurableObject<Env> {
     this.normal();
     check(typeof paused === 'boolean', 'invalid_pause');
     this.transaction(() => {
-      const c = this.db.control();
+      const c = this.db.control(); this.mutable(c);
       if (c.paused === paused) return;
       c.paused = paused; this.db.record(c, 'pause', paused ? '1' : '0'); this.db.save(c);
     });
     await this.ctx.storage.sync();
   }
-  /** The cut is constant-size. Pending R2 work will publish in the next epoch. */
+  /** No await or R2 work inside this short transaction. */
+  private closeEpoch(c: Control): string {
+    const old = c.epoch;
+    this.db.record(c, 'cuts', orderedU64(old));
+    this.db.sql.exec('INSERT INTO cuts VALUES (?, ?, ?)', orderedU64(old), canonical({ ...c, _policy: this.p }), String(Date.now()));
+    c.epoch = nextU64(old); this.db.save(c); return old;
+  }
   async cut(): Promise<string> {
     this.normal();
     const epoch = this.transaction(() => {
-      const c = this.db.control(), old = c.epoch;
-      this.db.record(c, 'cuts', orderedU64(old));
-      this.db.sql.exec('INSERT INTO cuts VALUES (?, ?, ?)', orderedU64(old), canonical({ ...c, _policy: this.p }), String(Date.now()));
-      c.epoch = nextU64(c.epoch); this.db.save(c); return old;
+      const c = this.db.control(); this.mutable(c);
+      check(c.partition === null, 'cluster_barrier_required'); return this.closeEpoch(c);
     });
     await this.ctx.storage.sync(); return epoch;
+  }
+  private member(journal: string) {
+    this.normal(); const c = this.db.control();
+    check(c.partition !== null, 'partition_required');
+    check(c.journal === journal, 'barrier_journal_changed'); return c;
+  }
+  barrierIdentity() {
+    this.normal(); const c = this.db.control(); check(c.partition !== null, 'partition_required');
+    return { partition: c.partition, journal: c.journal, epoch: c.epoch, position: c.position, barrier: c.barrier };
+  }
+  private setBarrier(c: Control, state: BarrierState) {
+    barrierTransition(c.barrier, state, c.epoch);
+    c.barrier = state; this.db.record(c, 'barrier', canonical(state)); this.db.save(c);
+  }
+  async barrierHold(id: string, epoch: string, journal: string) {
+    identifier(id); nextU64(epoch);
+    const state = this.transaction(() => {
+      const c = this.member(journal);
+      if (c.barrier?.id === id) { check(c.barrier.epoch === epoch, 'barrier_conflict'); return c.barrier; }
+      check(c.epoch === epoch, 'barrier_epoch_mismatch');
+      this.setBarrier(c, { id, epoch, phase: 'held', manifest: null }); return c.barrier;
+    });
+    await this.ctx.storage.sync(); return state;
+  }
+  async barrierCut(id: string, epoch: string, journal: string) {
+    identifier(id); nextU64(epoch);
+    this.transaction(() => {
+      const c = this.member(journal);
+      check(c.barrier?.id === id && c.barrier.epoch === epoch, 'barrier_conflict');
+      if (c.epoch === nextU64(epoch)) return; // Lost cut reply; never increment twice.
+      check(c.epoch === epoch && c.barrier.phase === 'held', 'barrier_epoch_mismatch'); this.closeEpoch(c);
+    });
+    await this.ctx.storage.sync(); return this.snapshotHeader(epoch);
+  }
+  async barrierRelease(id: string, journal: string) {
+    identifier(id); const before = this.member(journal);
+    check(before.barrier?.id === id, 'barrier_conflict');
+    if (before.barrier.phase === 'released') { await this.ctx.storage.sync(); return before.barrier; }
+    // Fetch the committed manifest from the trusted controller, never from a caller.
+    const m = manifest(await this.env.CORE_BARRIER!.getByName('barrier').published(id));
+    const hash = await digest(canonical(m));
+    const state = this.transaction(() => {
+      const c = this.member(journal), p = c.partition!;
+      check(c.barrier?.id === id && c.barrier.epoch === m.epoch && c.epoch === nextU64(m.epoch)
+        && same(p.topology, m.topology), 'barrier_conflict');
+      const local = validateHeader(JSON.parse(this.recovery.header(m.epoch)));
+      check(same(m.cuts[p.shard], local), 'barrier_cut_mismatch');
+      if (c.barrier.phase === 'released') { check(c.barrier.manifest === hash, 'barrier_conflict'); return c.barrier; }
+      this.setBarrier(c, { id, epoch: m.epoch, phase: 'released', manifest: hash }); return c.barrier;
+    });
+    await this.ctx.storage.sync(); return state;
   }
   snapshotHeader(epoch: string, baseEpoch: string | null = null, chain: string | null = null) {
     this.normal(); return this.recovery.header(epoch, baseEpoch, chain);
