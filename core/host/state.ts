@@ -4,7 +4,7 @@ import { check, nextU64, orderedU64 } from '../src/bytes.ts';
 import type { Policy } from './policy.ts';
 
 export type Control = {
-  schema: 5; partition: Partition | null; barrier: BarrierState | null; origin: string; journal: string; position: string; epoch: string; paused: boolean;
+  schema: 6; partition: Partition | null; barrier: BarrierState | null; origin: string; journal: string; position: string; epoch: string; paused: boolean;
   growth: BucketState; burst: BucketState; attempts: BucketState;
   moderation: string; accepted: string; reservedBytes: string; acceptedDebit: string;
 };
@@ -28,7 +28,7 @@ export class State {
     // Refuse old state before any schema mutation; the operator chooses a fresh directory.
     if (sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='control'").toArray().length) {
       const c = this.control();
-      check(c.schema === 5 && c.origin === origin && same(c.partition, partition), 'incompatible_native_database');
+      check(c.schema === 6 && c.origin === origin && same(c.partition, partition), 'incompatible_native_database');
     }
     sql.exec(`CREATE TABLE IF NOT EXISTS control (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sources (
@@ -49,12 +49,12 @@ export class State {
       CREATE TABLE IF NOT EXISTS cuts (epoch TEXT PRIMARY KEY, control TEXT NOT NULL, at_ms TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS journal (position TEXT PRIMARY KEY, kind TEXT NOT NULL, key TEXT NOT NULL);
       CREATE UNIQUE INDEX IF NOT EXISTS journal_fact ON journal(kind, key) WHERE kind NOT IN ('pause', 'barrier');`);
-    const initial: Control = { schema: 5, partition, barrier: null, origin, journal: crypto.randomUUID().replaceAll('-', ''), position: '0', epoch: '0', paused: false,
+    const initial: Control = { schema: 6, partition, barrier: null, origin, journal: crypto.randomUUID().replaceAll('-', ''), position: '0', epoch: '0', paused: false,
       growth: full(p.growth, now), burst: full(p.burst, now), attempts: full(p.attempts, now),
       moderation: '0', accepted: '0', reservedBytes: '0', acceptedDebit: '0' };
     sql.exec('INSERT OR IGNORE INTO control VALUES (1, ?)', JSON.stringify(initial));
     const c = this.control();
-    check(c.schema === 5 && c.origin === origin && same(c.partition, partition), 'incompatible_native_database');
+    check(c.schema === 6 && c.origin === origin && same(c.partition, partition), 'incompatible_native_database');
   }
   /** Call in the same transaction as the fact and save(c); no payload duplication. */
   record(c: Control, kind: ChangeKind, key: string): string {

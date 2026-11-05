@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { localCluster, configuration, origin, finish } from './barrier-local.mjs';
+import { localCluster, configuration, origin, finish, bodyOn } from './barrier-local.mjs';
 import { actionBytes } from '../src/action.ts';
 import { textBytes, utf8, orderedU64 } from '../src/bytes.ts';
 import { parseReceipt } from '../src/receipt.ts';
@@ -12,7 +12,7 @@ import { backup, incrementalBackup, verifyChain, restore } from '../scripts/reco
 const id = n => n.toString(16).padStart(32,'0');
 const action = (path, body) => actionBytes({destination:origin+path,body:textBytes(body)},origin);
 async function source(core, body) {
-  return parseReceipt(textBytes(await core.submit(action('/sea',body))),origin).result.slice(origin.length);
+  return parseReceipt(textBytes(await core.submit(action('/sea',await bodyOn(core.shardName,body)))),origin).result.slice(origin.length);
 }
 async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(),'sprig-barrier-'));
@@ -41,7 +41,7 @@ test('two durable participants cut together; manifest precedes release and manua
   await assert.rejects(a.pause(true),/barrier_held/);
   await assert.rejects(a.suppress(path,true),/barrier_held/);
   await assert.rejects(a.blockAuthor(path,true),/barrier_held/);
-  assert.equal(utf8(await a.read(path)),'A fern before the cut.');
+  assert.equal(utf8(await a.read(path)),await bodyOn('fern','A fern before the cut.'));
   assert.deepEqual(await a.stats(),held); // No new attempt debit while held.
   await until(h.controller,id(1),'publish');
   await assert.rejects(h.controller.published(id(1)),/barrier_not_published/);
@@ -66,7 +66,7 @@ test('two durable participants cut together; manifest precedes release and manua
 });
 
 test('an R2 upload never holds the barrier; its paid reservation and later publication straddle the cut',async t=>{
-  const h=await fixture(t), a=h.shard('fern'), bytes=action('/sea','An unhurried upload.');
+  const h=await fixture(t), a=h.shard('fern'), bytes=action('/sea',await bodyOn('fern','An unhurried upload.'));
   await a.testCommand('hold-put',{});
   const pending=a.submit(bytes); // Attach a rejection handler before releasing the transfer.
   const outcome=pending.then(value=>({value}),error=>({error}));
@@ -144,7 +144,7 @@ test('closed per-shard archives retain barrier facts and stay verifiable after l
   assert.deepEqual(await readFile(full),await readFile(copy));
   const targetDirectory=join(h.directory,'restore');const target=await localCluster({directory:targetDirectory,restoring:true});
   t.after(()=>target.dispose());
-  assert.equal((await restore(target.shard('fern'),full,first.footer.chain)).phase,'restored');
+  await assert.rejects(restore(target.shard('fern'),full,first.footer.chain),/cluster_recovery_required/);
   await assert.rejects(target.shard('fern').restoreRelease(first.footer.chain,'history-reconciled'),/cluster_recovery_required/);
 });
 

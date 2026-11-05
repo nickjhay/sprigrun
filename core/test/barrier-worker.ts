@@ -15,8 +15,8 @@ export class TestBarrier extends NativeBarrier {
   protected override async afterCommit(phase: string) { this.hit('commit:' + phase); }
 }
 const memberMethods = ['submit', 'read', 'stats', 'pause', 'suppress', 'blockAuthor', 'cut', 'barrierIdentity', 'barrierHold', 'barrierCut', 'barrierRelease',
-  'snapshotHeader', 'snapshotPage', 'snapshotBatch', 'snapshotRecord', 'restoreStatus', 'restoreBegin', 'restoreRecord', 'restoreFinish', 'restoreRelease', 'testCommand'];
-const controllerMethods = ['initialize', 'configuration', 'start', 'step', 'status', 'published', 'fail', 'omitCut'];
+  'snapshotHeader', 'snapshotPage', 'snapshotBatch', 'snapshotRecord', 'restoreStatus', 'restoreBegin', 'restoreRecord', 'restoreFinish', 'restoreRelease', 'testCommand', 'referenceFact', 'evidence', 'latest', 'describe', 'describeAction', 'browse', 'policyPage', 'policyStatus', 'clusterPristine', 'clusterCut', 'clusterReady', 'clusterFact', 'clusterPolicy', 'clusterVerify', 'clusterRelease'];
+const controllerMethods = ['initialize', 'configuration', 'start', 'step', 'status', 'published', 'fail', 'omitCut', 'restoreStatus', 'restoreBegin', 'restoreStep', 'restorePlan', 'restorePublished'];
 export default {
   async fetch(request: Request, env: any) {
     try {

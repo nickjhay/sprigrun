@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { localCluster, finish, origin } from '../test/barrier-local.mjs';
+import { localCluster, finish, origin, bodyOn } from '../test/barrier-local.mjs';
 import { actionBytes } from '../src/action.ts';
 import { textBytes, utf8 } from '../src/bytes.ts';
 import { parseReceipt } from '../src/receipt.ts';
@@ -14,7 +14,8 @@ let host;
 try {
   host = await localCluster({ directory }); await host.controller.initialize();
   const plants = { fern: 'A fern unfolds between two cuts.\n', moss: 'Moss keeps the small things together.\n' }, paths = {};
-  for (const [name, body] of Object.entries(plants)) {
+  for (const name of Object.keys(plants)) {
+    const body = plants[name] = await bodyOn(name, plants[name]);
     const receipt = await host.shard(name).submit(actionBytes({ destination: origin + '/sea', body: textBytes(body) }, origin));
     paths[name] = parseReceipt(textBytes(receipt), origin).result.slice(origin.length);
   }
@@ -35,5 +36,5 @@ try {
     if (rows.cuts.length !== 1 || (await core.stats()).epoch !== '1') throw Error('duplicate_cut');
     console.log(name + ': one cut, verified archive, original source intact.');
   }
-  console.log('The shared photograph is complete. Whole-cluster restore and cross-shard references are the next part.');
+  console.log('The shared photograph is complete. The cluster recovery drill also restores references across these participants.');
 } finally { await host?.dispose(); await rm(directory, { recursive: true, force: true }); }

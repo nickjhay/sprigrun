@@ -34,6 +34,8 @@ No collection number, receipt, acceptance time, reservation or policy is erased.
 
 A digest proves the supplied chain, not that no later writes exist. Operators
 must fence the old writer and identify the final trusted cut. If that evidence
-is unavailable, keep the target quarantined. The [D1 laboratory](BARRIER.md) now journals partition binding and hold/release
-transitions and exercises a durable global barrier. Whole-cluster restore,
-cross-owner references and dynamic writer fencing remain later work.
+is unavailable, keep the target quarantined. [BARRIER.md](BARRIER.md) journals partition binding and hold/release transitions.
+[CLUSTER.md](CLUSTER.md) extends recovery to the complete cut set: import every
+member in quarantine, check remote references in bounded pages, reconstruct
+controller history, then publish one release decision. Dynamic writer movement
+and public sharded HTTP remain later work.

@@ -1,4 +1,4 @@
-import { partition, barrierState, barrierTransition, dividedPolicy, same, type BarrierState } from './topology.ts';
+import { partition, shardFor, barrierState, barrierTransition, dividedPolicy, same, type BarrierState } from './topology.ts';
 import { canonical, fields } from './shape.ts';
 export { canonical, fields } from './shape.ts';
 // Portable logical archive contract. No SQL, R2 or HTTP implementation here.
@@ -13,7 +13,7 @@ import { validateChange, type PolicyChange } from './moderation.ts';
 import { policy, type Policy } from './policy.ts';
 import type { Control, Result, Source } from './state.ts';
 
-export const FORMAT = 'sprig-native-snapshot/5';
+export const FORMAT = 'sprig-native-snapshot/6';
 export const MAX_LINE = 2 * 1024 * 1024;
 export const PAGE_SIZE = 32;
 export const TABLES = ['sources', 'results', 'moderation', 'cuts'] as const;
@@ -59,7 +59,7 @@ export function validatePolicy(value: unknown): Policy {
 }
 export function validateControl(value: unknown): Control {
   fields(value, ['schema', 'partition', 'barrier', 'origin', 'journal', 'position', 'epoch', 'paused', 'growth', 'burst', 'attempts', 'moderation', 'accepted', 'reservedBytes', 'acceptedDebit']);
-  check(value.schema === 5 && typeof value.paused === 'boolean', 'archive_control');
+  check(value.schema === 6 && typeof value.paused === 'boolean', 'archive_control');
   partition(value.partition); barrierState(value.barrier);
   check(value.partition !== null || value.barrier === null, 'archive_partition');
   check(matches(/^[0-9a-f]{32}$/, value.journal), 'archive_journal');
@@ -127,6 +127,9 @@ export async function validateRecord(value: unknown, h: Header): Promise<Record>
   if (r.type === 'pause') { check(typeof r.paused === 'boolean', 'archive_pause'); return r; }
   if (r.type === 'barrier') { check(h.control.partition !== null && barrierState(r.state) !== null, 'archive_barrier'); return r; }
   const row = r.row;
+  const p = h.control.partition;
+  if (p && (r.type === 'sources' || r.type === 'results'))
+    check(await shardFor(p.topology, r.type === 'sources' ? '/sea/' + r.row.address : r.row.path) === p.shard, 'archive_wrong_shard');
   if (r.type === 'sources') {
     const s = r.row;
     fields(s, ['address','bytes','debit','reserved_epoch','reserved_at_ms']);

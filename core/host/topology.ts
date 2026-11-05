@@ -1,9 +1,10 @@
-import { check, nextU64, u64 } from '../src/bytes.ts';
+import { owner } from './placement.ts';
+import { check, nextU64, textBytes, u64 } from '../src/bytes.ts';
 import { canonicalOrigin } from '../src/references.ts';
 import { policy, type Policy } from './policy.ts';
 import { canonical, fields } from './shape.ts';
 
-export type Topology = { format: 'sprig-topology/1'; id: string; revision: string;
+export type Topology = { format: 'sprig-topology/2'; id: string; revision: string;
   origin: string; shards: Record<string, true>; budget: Policy };
 export type Partition = { topology: Topology; shard: string };
 export type BarrierState = { id: string; epoch: string; phase: 'held' | 'released'; manifest: string | null };
@@ -12,7 +13,7 @@ export function identifier(value: unknown): asserts value is string {
 }
 export function topology(value: unknown): Topology {
   fields(value, ['format', 'id', 'revision', 'origin', 'shards', 'budget']);
-  check(value.format === 'sprig-topology/1', 'topology_version');
+  check(value.format === 'sprig-topology/2', 'topology_version');
   identifier(value.id); u64(value.revision); canonicalOrigin(value.origin);
   check(value.shards !== null && typeof value.shards === 'object' && !Array.isArray(value.shards), 'topology_shards');
   const names = Object.keys(value.shards);
@@ -56,3 +57,11 @@ export function barrierTransition(previous: BarrierState | null, next: BarrierSt
     && nextU64(next.epoch) === epoch, 'barrier_transition');
 }
 export function same(a: unknown, b: unknown) { return canonical(a) === canonical(b); }
+
+/** Fixed placement v2: SHA-256 of the canonical logical owner, big-endian modulo roster size. */
+export async function shardFor(t: Topology, path: string): Promise<string> {
+  const names = Object.keys(t.shards).sort();
+  const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', textBytes(owner(path))));
+  let index = 0; for (const byte of bytes) index = (index * 256 + byte) % names.length;
+  return names[index]!;
+}

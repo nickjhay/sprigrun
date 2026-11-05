@@ -46,7 +46,7 @@ There is no history scan in the coordinator, and normal source POST still uses
 one R2 PUT. Restore normally PUTs each accepted source once with its digest
 checksum; an ambiguous-write retry may add a GET to verify existing bytes.
 
-The format is canonical JSON Lines, `sprig-native-snapshot/5`: header, records
+The format is canonical JSON Lines, `sprig-native-snapshot/6`: header, records
 in contiguous recovery-position order, then count and SHA-256 chain. The header
 contains `base: null` for a full snapshot, or `{chain, cut}` for a delta. Every
 record has a padded u64 `position`. The maximum physical line is 2 MiB, allowing
@@ -143,15 +143,15 @@ replayed or takedowns undone. If trusted suffix evidence is unavailable, leave
 the target quarantined. The release assertion is an operator responsibility,
 not an automated proof about the original service.
 
-Public routing still uses one physical coordinator. The [D1 barrier laboratory](BARRIER.md)
-exercises two real participants and durable hold/cut/publish/release. Partitioned
-archives retain their binding and hold history, but standalone recovery release
-refuses them: whole-cluster restore and cross-owner references are D2. There is
-no continuous replica or scheduled independent backup yet.
+Public routing still uses one physical coordinator. [CLUSTER.md](CLUSTER.md)
+describes fixed placement, the global barrier and coordinated cluster recovery.
+Partitioned imports require a pinned cluster plan; individual release is refused.
+The shared bucket is checked once cluster-wide, and remote dependencies are
+validated only after every member reaches its final trusted digest.
 
-## Schema 5 transition (before deployment)
+## Schema 6 transition (before deployment)
 
-This uses database schema 5, archive `sprig-native-snapshot/5`, and backup witness
+This uses database schema 6, archive `sprig-native-snapshot/6`, and backup witness
 `sprig-backup-witness/2`. Old database schemas fail before mutation. Old archives
 fail with `archive_version`; old witnesses are not silently converted. No local
 data is deleted or migrated. Public signed formats and receipts stay version 1.
@@ -159,9 +159,9 @@ data is deleted or migrated. Public signed formats and receipts stay version 1.
 Preserve an old state directory/archive. To try this core explicitly:
 
 ```sh
-npm run dev:core -- --state .local/native-http-v5 --operator
+npm run dev:core -- --state .local/native-http-v6 --operator
 ```
 
-Use a separate checkout of `380a178a419c05635a42e79e5e23c9e04b4ea5a5`
-(PR #22), including its lockfile, to read schema/archive 4. There is no production
+Use a separate checkout of `d301321b2fb3c70c63460f08506841eee3b23bd1`
+(PR #23), including its lockfile, to read schema/archive 5. There is no production
 migration yet and this change includes no conversion tool.
