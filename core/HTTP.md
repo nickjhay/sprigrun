@@ -48,7 +48,7 @@ changes; there is no hot reload.
 | `GET RECORD` | Exact inert UTF-8 text |
 | `GET RECORD?view=html` | Escaped text, metadata and ordinary navigation links |
 | `GET /action/RESULT_PATH`, `/receipt/RESULT_PATH`, `/evidence/RESULT_PATH` | One result’s exact action, receipt, or JSON signature evidence |
-| `GET /stats` | Admission caps, credits, accepted/debit totals, journal bytes, epoch and live upload count |
+| `GET /stats` | Admission caps, credits, accepted/debit totals, journal bytes and live upload count |
 | `POST /sea` | Anonymous exact UTF-8 source; receipt in response |
 | `POST COLLECTION` or `POST EXISTING_ENTRY` | Append, with the optional existing entry as anchor |
 
@@ -159,7 +159,7 @@ At the cutoff, POST returns `503 capacity_limit` before body consumption or paid
 R2 work, including retry POSTs. Existing receipt GETs remain usable. The response
 points to `/stats` and does not advertise a timed retry: operator action is needed.
 `journal_capacity_bytes` and `capacity_reached` accompany `journal_bytes` there.
-Moderation, cuts and recovery bypass this public growth guard. It reserves room
+Moderation, pause and recovery bypass this public growth guard. It reserves room
 for operations; it is not an R2 quota, provider hard limit or automatic alarm.
 
 The runtime and clients may normalize a URL before our code sees it. We require
@@ -182,19 +182,18 @@ URL. Fixed table queries only; there is no generic RPC or arbitrary SQL endpoint
 | `POST /admin/suppress` | `{"path":"/grove/fern.0","suppressed":true}` |
 | `POST /admin/block-author` | `{"key":"/sea/HASH_LENGTH","blocked":true}` |
 | `GET /admin/policy?after=0` | Bounded policy history and last applied position |
-| `POST /admin/cut` | Empty body; closes an epoch |
-| `GET /admin/snapshot/header?epoch=N` | Full header; add `base=B&chain=SHA256` for a delta |
-| `GET /admin/snapshot/page?epoch=N&after=C` | Bounded journal positions |
-| `GET /admin/snapshot/record?epoch=N&position=P` | One exact archive record |
-| `GET /admin/snapshot/batch?epoch=N&after=C` | Bounded ordered records, including accepted source bodies |
+| `GET /admin/feed/header` | Read-only capture of control, policy, journal identity and inclusive position P |
+| `GET /admin/feed/page?journal=J&through=P&after=C` | Bounded journal positions in the captured prefix |
+| `GET /admin/feed/record?journal=J&through=P&position=N` | One exact archive record |
+| `GET /admin/feed/batch?journal=J&through=P&after=C` | Bounded ordered records with accepted source bodies |
 | `GET /admin/recovery/status` | Persistent recovery status |
 | `POST /admin/restore/begin` | JSON containing canonical `header`/`footer` strings and final trusted `target` digest |
 | `POST /admin/restore/record?index=N` | One canonical archive line |
 | `POST /admin/restore/finish` | Empty body; finish this segment (`awaiting_delta` or `restored`) |
 | `POST /admin/restore/release` | JSON `chain` and `confirmation: "history-reconciled"` |
 
-A separate `BACKUP_TOKEN` secret can authorize snapshot reads and `POST /admin/cut`
-only. See [OPERATIONS.md](OPERATIONS.md) for the independent runner and digest
+A separate `BACKUP_TOKEN` secret authorizes only GET/HEAD on those four feed
+routes. It cannot mutate state; checkpoint headers are retained by the client. See [OPERATIONS.md](OPERATIONS.md) for the independent runner and digest
 custody. Choose a different value from `ADMIN_TOKEN`. Export includes suppressed
 content, so this is still a privileged credential.
 
@@ -248,13 +247,13 @@ oversized bodies, shared upload slots, operator auth, suppression, corrupt R2,
 and authenticated recovery. HTML is parsed and links are followed in integration
 tests; this is not a substitute for visual browser testing.
 
-## Schema 5 transition (before deployment)
+## Schema 7 transition (before deployment)
 
-The database is schema 6, the archive is `sprig-native-snapshot/6`, and the backup
-witness is version 2. Old state is refused before mutation, never reset silently.
-Use a fresh directory explicitly (`--state .local/native-http-v6`) and preserve
-old files. [RECOVERY.md](RECOVERY.md#schema-6-transition-before-deployment) identifies
-the previous reader and explains the transition. Public signed formats stay v1.
+Database schema 7, archive `sprig-native-snapshot/7`, backup witness version 3.
+Old state is refused before mutation, never reset silently. Preserve old files
+and explicitly use a fresh directory (`--state .local/native-http-v7`).
+[RECOVERY.md](RECOVERY.md#schema-7-transition-before-deployment) identifies the
+preserved schema-6 reader. Public signed formats stay v1.
 
 ## Separate content and author policies
 
@@ -270,11 +269,10 @@ attempt credit is charged, but allocation and publication debit do not advance.
 `GET /admin/policy?after=0` returns at most 32 ordered changes, the next decimal
 cursor, current high-water mark, and applied position/status. Follow `more`;
 never infer completeness from a partial page. The single local authority applies
-updates immediately. The minute-scale follower is groundwork for future shards,
-not a promise of a remote moderation service already running. Both endpoints
+updates immediately. There is no background follower. Both endpoints
 require the full operator token; the backup credential cannot use them.
 The `moderation` table is also available in the existing operator inspector.
 
-The public entrypoint refuses `CORE_TOPOLOGY` until metered sharded ingress, aggregate views
-and operator routing are ready. The [barrier laboratory](BARRIER.md) uses privileged local RPC
-and must not be deployed as a public adapter.
+The active entrypoint uses one coordinator. Future shards may have weaker
+cross-shard consistency; routing and placement will be designed later. The old
+cluster/barrier experiment is preserved in Git, outside the active deployment.

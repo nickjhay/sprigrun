@@ -59,7 +59,7 @@ test('snapshot plus two deltas restores exact history, blocks, times and numbers
   const c = await h.core.stats();
   for (const key of ['journal', 'position', 'accepted', 'reservedBytes', 'acceptedDebit', 'moderation'])
     assert.equal(c[key], parts[2].header.control[key], key);
-  assert.equal(c.epoch, '3'); assert.equal(c.paused, true);
+  assert.equal(Object.hasOwn(c, 'epoch'), false); assert.equal(c.paused, true);
   for (const name of ['growth', 'burst', 'attempts']) assert.equal(c[name].tokens, 0);
   await h.core.restoreFinish(); assert.deepEqual(await h.core.stats(), c); // Finishing twice changes no credits/times.
   await h.core.restoreRelease(final, 'history-reconciled');
@@ -169,4 +169,18 @@ test('prepared restore cannot trust changed bytes, framing or caller-mutated des
   input[0] = 'not-the-checked-file'; prepared.final.footer.chain = '0'.repeat(64);
   assert.equal((await prepared.restore(h.core)).phase, 'restored');
   assert.equal((await h.core.restoreStatus()).expected, chain);
+});
+
+test('an empty increment is read-only and restores after its exact base', async t => {
+  const source = await localNative({ policy: drillPolicy }); t.after(() => source.dispose());
+  await plant(source.core);
+  const fullFile = join(dir, 'unchanged-full.jsonl'), deltaFile = join(dir, 'unchanged-delta.jsonl');
+  const full = await backup(source.core, fullFile), before = await source.core.stats();
+  const delta = await incrementalBackup(source.core, deltaFile, fullFile, full.footer.chain);
+  assert.deepEqual(await source.core.stats(), before);
+  assert.equal(delta.footer.count, '0');
+  assert.equal(delta.header.control.position, full.header.control.position);
+  const h = await target(t);
+  assert.equal((await restoreChain(h.core, [fullFile, deltaFile], delta.footer.chain)).phase, 'restored');
+  assert.equal((await h.core.stats()).accepted, before.accepted);
 });

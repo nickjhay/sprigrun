@@ -61,7 +61,7 @@ export async function drill(file) {
     host = await localNative({ directory: target, policy: drillPolicy, restoring: true });
     await restore(host.core, file, saved.footer.chain);
     await assert.rejects(host.core.read(garden.source), /recovery_mode/);
-    // Valid only because this isolated drill knows there was no post-cut history.
+    // Valid only because this isolated drill knows there was no post-checkpoint history.
     await host.core.restoreRelease(saved.footer.chain, 'history-reconciled');
     await host.dispose();
     host = await localNative({ directory: target, policy: drillPolicy });

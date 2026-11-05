@@ -4,8 +4,8 @@ import { build } from 'esbuild';
 import { Miniflare, Log, LogLevel } from 'miniflare';
 import { fileURLToPath } from 'node:url';
 let compiled;
-const methods = ['submit', 'read', 'latest', 'evidence', 'stats', 'suppress', 'blockAuthor', 'policyPage', 'policyStatus', 'pause', 'cut',
-  'snapshotHeader', 'snapshotPage', 'snapshotRecord', 'snapshotBatch', 'restoreStatus', 'restoreBegin',
+const methods = ['submit', 'read', 'latest', 'evidence', 'stats', 'suppress', 'blockAuthor', 'policyPage', 'policyStatus', 'pause',
+  'checkpoint', 'snapshotPage', 'snapshotRecord', 'snapshotBatch', 'restoreStatus', 'restoreBegin',
   'restoreRecord', 'restoreFinish', 'restoreRelease'];
 export async function localNative({ directory, origin = 'https://sprig.run', policy, restoring = false } = {}) {
   compiled ??= build({ stdin: {

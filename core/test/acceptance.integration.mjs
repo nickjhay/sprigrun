@@ -67,7 +67,7 @@ async function held(mf, n = 1) {
     if (await json(rpc(mf, '/waiting')) === n) return;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  assert.fail('preparation did not reach the barrier');
+  assert.fail('preparation did not reach the test hold');
 }
 
 test('source preparation, publication, chat, and a repeated intended send use real SQLite/R2', async t => {
@@ -161,10 +161,11 @@ test('exhausted recovery position fails closed without an unjournaled result or 
   const rows = await json(rpc(mf, '/rows')), before = await json(rpc(mf, '/stats'));
   await bad(submit(mf, act('/chat' + publication, 'overflow')), 'u64_overflow');
   await bad(rpc(mf, '/pause', { paused: true }), 'u64_overflow');
-  await bad(rpc(mf, '/cut'), 'u64_overflow');
+  const checkpoint = JSON.parse(await json(rpc(mf, '/checkpoint')));
+  assert.equal(checkpoint.control.position, before.position);
   assert.deepEqual(await json(rpc(mf, '/rows')), rows);
   const after = await json(rpc(mf, '/stats'));
-  for (const k of ['position', 'epoch', 'accepted', 'acceptedDebit', 'paused']) assert.equal(after[k], before[k]);
+  for (const k of ['position', 'accepted', 'acceptedDebit', 'paused']) assert.equal(after[k], before[k]);
 });
 
 test('failed source acceptance leaves a private, paid preparation; retry publishes it once', async t => {
@@ -307,8 +308,8 @@ test('u64 allocation works beyond JS safe integers and rejects overflow without 
   assert.equal((await json(rpc(mf, '/stats'))).acceptedDebit, before.acceptedDebit);
 });
 
-test('an epoch cut does not wait for a stalled R2 PUT and moves pending commits across the boundary', async t => {
-  const mf = use(t), value = 'a fern between epochs', bytes = act('/sea', value);
+test('a read-only checkpoint does not wait for a stalled R2 PUT and excludes its later acceptance', async t => {
+  const mf = use(t), value = 'a fern between checkpoints', bytes = act('/sea', value);
   await good(rpc(mf, '/hold-put'));
   const pending = submit(mf, bytes);
   for (let i = 0; i < 80; i++) {
@@ -316,14 +317,15 @@ test('an epoch cut does not wait for a stalled R2 PUT and moves pending commits 
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   assert.equal((await json(rpc(mf, '/io'))).waiting, 1);
-  assert.equal(await json(rpc(mf, '/cut')), '0');
+  const checkpoint = JSON.parse(await json(rpc(mf, '/checkpoint')));
   const during = await json(rpc(mf, '/rows'));
   assert.equal(during.results.length, 0);
-  assert.equal(during.sources[0].reserved_epoch, '00000000000000000000');
+  assert.equal(during.sources.length, 1);
+  assert.equal(checkpoint.control.accepted, '0');
   await good(rpc(mf, '/release-put')); await good(pending);
   const after = await json(rpc(mf, '/rows'));
-  assert.equal(after.results[0].epoch, '00000000000000000001');
-  assert.equal(JSON.parse(after.cuts[0].control).accepted, '0');
+  assert.equal(after.results.length, 1);
+  assert.equal(BigInt(after.journal.at(-1).position), BigInt(checkpoint.control.position) + 1n);
 });
 
 test('pause blocks an in-flight commit and bounded preparation leaves operator control responsive', async t => {
@@ -333,7 +335,7 @@ test('pause blocks an in-flight commit and bounded preparation leaves operator c
   await held(mf, 8);
   await bad(submit(mf, act(base, 'ninth')), 'preparation_busy');
   await good(rpc(mf, '/pause', { paused: true }));
-  assert.equal(await json(rpc(mf, '/cut')), '0');
+  const checkpoint = JSON.parse(await json(rpc(mf, '/checkpoint')));
   await good(rpc(mf, '/release'));
   await Promise.all(pending.map(response => bad(response, 'writes_paused')));
   await good(rpc(mf, '/pause', { paused: false }));
@@ -343,30 +345,30 @@ test('pause blocks an in-flight commit and bounded preparation leaves operator c
 // These operator methods only traverse the test adapter, never a public router.
 function recovery(mf) {
   return {
-    cut: () => json(rpc(mf, '/cut')),
-    snapshotHeader: (epoch, base, chain) => json(rpc(mf, '/snapshotHeader', { epoch, base, chain })),
-    snapshotPage: (epoch, after) => json(rpc(mf, '/snapshotPage', { epoch, after })),
-    snapshotRecord: (epoch, position) => json(rpc(mf, '/snapshotRecord', { epoch, position })),
+    checkpoint: () => json(rpc(mf, '/checkpoint')),
+    snapshotPage: (journal, through, after) => json(rpc(mf, '/snapshotPage', { journal, through, after })),
+    snapshotRecord: (journal, through, position) => json(rpc(mf, '/snapshotRecord', { journal, through, position })),
     restoreBegin: (header, footer, target) => json(rpc(mf, '/restoreBegin', { header, footer, target })),
     restoreRecord: (index, line) => json(rpc(mf, '/restoreRecord', { index, line })),
     restoreFinish: () => json(rpc(mf, '/restoreFinish')),
   };
 }
 
-test('a pre-cut paid reservation restores without an unpublished R2 body, even when it later commits', async t => {
-  const mf = use(t), value = 'between epochs', bytes = act('/sea', value);
+test('a checkpointed paid reservation restores without an unpublished R2 body, even when it later commits', async t => {
+  const mf = use(t), value = 'between checkpoints', bytes = act('/sea', value);
   await good(rpc(mf, '/hold-put'));
   const pending = submit(mf, bytes);
   for (let i = 0; i < 100 && (await json(rpc(mf, '/io'))).waiting !== 1; i++)
     await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal((await json(rpc(mf, '/io'))).waiting, 1);
-  const core = recovery(mf), epoch = await core.cut();
-  const page = await core.snapshotPage(epoch, '0');
-  const during = await core.snapshotRecord(epoch, page.keys[0]);
+  const core = recovery(mf), checkpoint = await core.checkpoint();
+  const { journal, position: through } = JSON.parse(checkpoint).control;
+  const page = await core.snapshotPage(journal, through, '0');
+  const during = await core.snapshotRecord(journal, through, page.keys[0]);
   assert.equal(JSON.parse(during).type, 'sources'); assert.equal(Object.hasOwn(JSON.parse(during), 'body'), false);
   await good(rpc(mf, '/release-put')); await good(pending);
-  assert.equal(await core.snapshotRecord(epoch, page.keys[0]), during);
-  const file = join(scratch, 'reservation.jsonl'), saved = await backup(core, file, epoch);
+  assert.equal(await core.snapshotRecord(journal, through, page.keys[0]), during);
+  const file = join(scratch, 'reservation.jsonl'), saved = await backup(core, file, checkpoint);
   const deltaFile = join(scratch, 'reservation-delta.jsonl');
   const delta = await incrementalBackup(core, deltaFile, file, saved.footer.chain);
   const target = start({}, undefined, true); t.after(() => target.dispose());
@@ -378,8 +380,8 @@ test('a pre-cut paid reservation restores without an unpublished R2 body, even w
   assert.equal((await restore(recovery(target), deltaFile, delta.footer.chain)).phase, 'restored');
   const published = await json(rpc(target, '/rows'));
   assert.equal(published.sources.length, 1); assert.equal(published.results.length, 1);
-  assert.equal(published.sources[0].reserved_epoch, orderedU64('0'));
-  assert.equal(published.results[0].epoch, orderedU64('1'));
+  assert.deepEqual(published.sources[0], JSON.parse(during).row);
+  assert.equal(BigInt(published.journal.at(-1).position), BigInt(through) + 1n);
   assert.equal((await json(rpc(target, '/io'))).puts, 1);
   assert.equal((await json(rpc(target, '/stats'))).reservedBytes, '8192');
 });
@@ -521,21 +523,19 @@ test('an action accepted before policy delivery can be hidden later without rewr
 });
 
 
-test('a late policy with an older issue epoch cannot enter an already closed snapshot', async t => {
+test('a later policy cannot enter an already captured prefix', async t => {
   const mf = use(t), owner = await identity(mf);
   await good(rpc(mf, '/block-author', { key: owner.key, blocked: true }));
-  const epoch = await json(rpc(mf, '/cut'));
-  const before = await json(rpc(mf, '/snapshotHeader', { epoch }));
+  const before = JSON.parse(await json(rpc(mf, '/checkpoint')));
+  const { journal, position: through } = before.control;
   await good(rpc(mf, '/policy-batch', [{ position: orderedU64('2'), effect: 'block',
-    path: owner.key, active: 0, epoch: orderedU64(epoch), at_ms: String(Date.now()) }]));
-  const old = await json(rpc(mf, '/snapshotPage', { epoch, after: '0' }));
-  const cut = JSON.parse(before).control.position;
-  assert.equal(old.keys.at(-1), cut);
-  assert.equal(await json(rpc(mf, '/snapshotHeader', { epoch })), before);
-  await bad(rpc(mf, '/snapshotRecord', { epoch, position: String(BigInt(cut) + 1n) }), 'archive_position');
-  const nextEpoch = await json(rpc(mf, '/cut'));
-  const next = await json(rpc(mf, '/snapshotPage', { epoch: nextEpoch, after: cut }));
-  assert.equal(next.keys.length, 2); // Late policy and the next cut.
+    path: owner.key, active: 0, at_ms: String(Date.now()) }]));
+  const old = await json(rpc(mf, '/snapshotPage', { journal, through, after: '0' }));
+  assert.equal(old.keys.at(-1), through);
+  await bad(rpc(mf, '/snapshotRecord', { journal, through, position: String(BigInt(through) + 1n) }), 'archive_position');
+  const nextHeader = JSON.parse(await json(rpc(mf, '/checkpoint')));
+  const next = await json(rpc(mf, '/snapshotPage', { journal, through: nextHeader.control.position, after: through }));
+  assert.equal(next.keys.length, 1);
 });
 
 

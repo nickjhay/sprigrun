@@ -72,7 +72,6 @@ export class TestCoordinator extends NativeCoordinator {
       results: this.db.sql.exec('SELECT * FROM results ORDER BY path').toArray(),
       moderation: this.db.sql.exec('SELECT * FROM moderation ORDER BY position').toArray(),
       journal: this.db.sql.exec('SELECT * FROM journal ORDER BY position').toArray(),
-      cuts: this.db.sql.exec('SELECT * FROM cuts ORDER BY epoch').toArray(),
     };
     else throw new Error('invalid_test_command');
     await this.ctx.storage.sync();
@@ -99,10 +98,9 @@ export default {
       if (path === '/suppress') { await stub.suppress(value.path, value.suppressed); return Response.json(null); }
       if (path === '/block-author') { await stub.blockAuthor(value.key, value.blocked); return Response.json(null); }
       if (path === '/pause') { await stub.pause(value.paused); return Response.json(null); }
-      if (path === '/cut') return Response.json(await stub.cut());
-      if (path === '/snapshotHeader') return Response.json(await stub.snapshotHeader(value.epoch, value.base, value.chain));
-      if (path === '/snapshotPage') return Response.json(await stub.snapshotPage(value.epoch, value.after));
-      if (path === '/snapshotRecord') return Response.json(await stub.snapshotRecord(value.epoch, value.position));
+      if (path === '/checkpoint') return Response.json(await stub.checkpoint());
+      if (path === '/snapshotPage') return Response.json(await stub.snapshotPage(value.journal, value.through, value.after));
+      if (path === '/snapshotRecord') return Response.json(await stub.snapshotRecord(value.journal, value.through, value.position));
       if (path === '/restoreStatus') return Response.json(await stub.restoreStatus());
       if (path === '/restoreBegin') return Response.json(await stub.restoreBegin(value.header, value.footer, value.target));
       if (path === '/restoreRecord') return Response.json(await stub.restoreRecord(value.index, value.line));

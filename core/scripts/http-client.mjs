@@ -61,11 +61,10 @@ export function nativeClient(origin, { token, fetcher = fetch, timeoutMs = 30000
             await receiptForAction(action, textBytes(receipt), origin);
             return { receipt, result: parseReceipt(textBytes(receipt), origin).result.slice(origin.length) };
         },
-        cut: async () => JSON.parse(await post('/admin/cut', undefined)),
-        snapshotHeader: (epoch, base = null, chain = null) => get('/admin/snapshot/header?' + qs({ epoch, ...(base === null ? {} : { base, chain }) })),
-        snapshotPage: async (epoch, after) => JSON.parse(await get('/admin/snapshot/page?' + qs({ epoch, after }))),
-        snapshotBatch: async (epoch, after) => JSON.parse(await get('/admin/snapshot/batch?' + qs({ epoch, after }))),
-        snapshotRecord: (epoch, position) => get('/admin/snapshot/record?' + qs({ epoch, position })),
+        checkpoint: () => get('/admin/feed/header'),
+        snapshotPage: async (journal, through, after) => JSON.parse(await get('/admin/feed/page?' + qs({ journal, through, after }))),
+        snapshotBatch: async (journal, through, after) => JSON.parse(await get('/admin/feed/batch?' + qs({ journal, through, after }))),
+        snapshotRecord: (journal, through, position) => get('/admin/feed/record?' + qs({ journal, through, position })),
         restoreBegin: async (header, footer, target = JSON.parse(footer).chain) => JSON.parse(await post('/admin/restore/begin', JSON.stringify({ header, footer, target }))),
         restoreRecord: async (index, line) => JSON.parse(await post('/admin/restore/record?' + qs({ index }), line)),
         restoreFinish: async () => JSON.parse(await post('/admin/restore/finish', undefined)),

@@ -6,9 +6,9 @@ import { at, collection } from './placement.ts';
 import type { Result } from './state.ts';
 
 /** No bodies, signatures or caller-provided authority. Only accepted immutable fields. */
-export type Fact = Pick<Result, 'path' | 'kind' | 'value' | 'controller' | 'binding' | 'epoch'>;
+export type Fact = Pick<Result, 'path' | 'kind' | 'value' | 'controller' | 'binding'>;
 export function fact(r: Fact): Fact {
-  return { path: r.path, kind: r.kind, value: r.value, controller: r.controller, binding: r.binding, epoch: r.epoch };
+  return { path: r.path, kind: r.kind, value: r.value, controller: r.controller, binding: r.binding };
 }
 /** Describe dependencies once; callers separately enforce visibility or historical validity. */
 export function requiredReferences(action: Action, key: string | null, value: string | null) {
@@ -26,7 +26,7 @@ export function readableLinks(r: Fact): string[] {
   if (r.value !== null) links.push(r.value);
   return links;
 }
-/** Both single-shard import and final cluster validation use these exact checks. */
+/** Historical dependency checks use the same references as live admission. */
 export async function checkResultLinks(a: Result, origin: string, existing: (path: string) => Promise<Fact>) {
   const action = parseAction(textBytes(a.header), origin);
   const key = parseReceipt(textBytes(a.receipt), origin).key;

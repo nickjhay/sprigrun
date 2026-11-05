@@ -83,18 +83,15 @@ def estimate(s: Scenario = Scenario(), prices: Prices = Prices()) -> dict:
     nsource, nchat = (history + month) * source_rate, (history + month) * chat_rate
     copies = math.ceil(30 / s.backup_every_days)
     deltas = math.ceil(30 / s.incremental_every_days) if s.incremental_every_days else 0
-    cut_rate = 1 / s.backup_every_days + (1 / s.incremental_every_days if deltas else 0)
-    cuts = math.ceil((365 * s.years + 30) * cut_rate)
     # Conservative: count deltas even at full-copy boundaries, and one request per
     # source body although small bodies can share a batch. Other journal facts batch.
-    def export_requests(ns, nc, nk):
-        return math.ceil(ns) + math.ceil((ns + nc + nk) / s.metadata_batch) + 2
+    def export_requests(ns, nc):
+        return math.ceil(ns) + math.ceil((ns + nc) / s.metadata_batch) + 2
     window = min(30, s.incremental_every_days)
     delta_sources, delta_chats = sources * window / 30, chats * window / 30
-    delta_cuts = math.ceil(window * cut_rate)
-    backups = copies * export_requests(nsource, nchat, cuts) + deltas * export_requests(delta_sources, delta_chats, delta_cuts)
+    backups = copies * export_requests(nsource, nchat) + deltas * export_requests(delta_sources, delta_chats)
     backup_sources = copies * nsource + deltas * delta_sources
-    backup_records = copies * (2 * nsource + nchat + cuts) + deltas * (2 * delta_sources + delta_chats + delta_cuts)
+    backup_records = copies * (2 * nsource + nchat) + deltas * (2 * delta_sources + delta_chats)
     requests = s.reads + sources + chats + backups
     usage = Usage(worker_requests=requests + s.extra_worker_requests,
         worker_cpu_ms=(requests + s.extra_worker_requests) * s.cpu_ms,
@@ -103,20 +100,20 @@ def estimate(s: Scenario = Scenario(), prices: Prices = Prices()) -> dict:
         r2_a=sources,
         r2_b=s.reads * s.source_read_share + chats * s.signed_chat_share + backup_sources,
         r2_gb_months=stored_sources * size / GB,
-        sql_gb_months=(average * sql_per_charge + cuts * 4096) / GB,
+        sql_gb_months=(average * sql_per_charge) / GB,
         # Estimated row operations including indexes; backup scans proportional to records.
         sql_rows_read=(s.reads + sources + chats + s.extra_do_requests) * 32 + backup_records * 8,
-        sql_rows_written=sources * 22 + chats * 19 + s.extra_do_requests * 16 + (copies + deltas) * 7)
+        sql_rows_written=sources * 22 + chats * 19 + s.extra_do_requests * 16)
     costs = bill(usage, prices)
-    archive_bytes = nsource * (size + 2048) + nchat * (2048 + chat) + cuts * 4096
+    archive_bytes = 4096 + nsource * (size + 2048) + nchat * (2048 + chat)
     # Retain each full copy plus a full interval's growth as its delta chain.
     suffix_bytes = ((sources * (size + 2048) + chats * (2048 + chat)) * s.backup_every_days / 30
-                    + math.ceil(s.backup_every_days * cut_rate) * 4096) if deltas else 0
+                    + math.ceil(s.backup_every_days / s.incremental_every_days) * 4096) if deltas else 0
     retained_archive_bytes = (archive_bytes + suffix_bytes) * s.backup_copies
     costs['Independent backup storage (estimate; zero means excluded)'] = retained_archive_bytes / GB * s.backup_gb_price
     capacity_days = SQL_LIMIT / (daily * sql_per_charge) if daily * sql_per_charge else None
     warnings = []
-    if sql_end + cuts * 4096 >= SQL_LIMIT:
+    if sql_end >= SQL_LIMIT:
         warnings.append('Exceeds one SQLite DO: 10 GB hard limit. Cost arithmetic beyond this point is hypothetical until partitioned.')
     if s.reads > 120 * 1440 * 30:
         warnings.append('Reads exceed the default 120/min steady refill; model those excess attempts as rejections.')
@@ -125,7 +122,7 @@ def estimate(s: Scenario = Scenario(), prices: Prices = Prices()) -> dict:
         'new_chats': chats, 'backup_http_requests': backups, 'backup_copies_this_month': copies,
         'incremental_copies_this_month': deltas, 'backup_source_gets': backup_sources,
         'retained_archive_gb_estimate': retained_archive_bytes / GB,
-        'archive_gb_end': archive_bytes / GB, 'sql_gb_end': (sql_end + cuts * 4096) / GB,
+        'archive_gb_end': archive_bytes / GB, 'sql_gb_end': (sql_end) / GB,
         'sql_capacity_days_from_empty_estimate': capacity_days, 'usage': asdict(usage),
         'costs_usd': costs, 'total_usd': sum(costs.values()), 'warnings': warnings}
 

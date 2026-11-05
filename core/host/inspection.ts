@@ -125,11 +125,11 @@ export class Inspection {
             }>(`SELECT value FROM ${table} WHERE id=1`).toArray();
             return { table, rows: rows.map(r => JSON.parse(r.value)), after: '', more: false };
         }
-        const keys: Record<string, string> = { sources: 'address', heads: 'collection', results: 'path', moderation: 'position', cuts: 'epoch', journal: 'position' };
+        const keys: Record<string, string> = { sources: 'address', heads: 'collection', results: 'path', moderation: 'position', journal: 'position' };
         const key = Object.hasOwn(keys, table) ? keys[table]! : null;
         check(key, 'invalid_table');
         // Large bodies/evidence have a dedicated single-record endpoint, not 32 copies per table page.
-        const projection = table === 'results' ? 'path,action,kind,collection,number,epoch,accepted_at_ms,debit,source,value,controller' : '*';
+        const projection = table === 'results' ? 'path,action,kind,collection,number,accepted_at_ms,debit,source,value,controller' : '*';
         const rows = this.db.sql.exec(`SELECT ${projection} FROM ${table} WHERE ${key}>? ORDER BY ${key} LIMIT ?`, after, PAGE_SIZE).toArray();
         return { table, rows, after: String(rows.at(-1)?.[key] ?? after), more: rows.length === PAGE_SIZE };
     }

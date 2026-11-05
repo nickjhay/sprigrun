@@ -12,7 +12,6 @@ export default {
     async fetch(request: Request, env: Env): Promise<Response> {
         let response: Response;
         try {
-            if (env.CORE_TOPOLOGY !== undefined) throw new HttpError(503, 'sharded_http_not_enabled');
             const url = urlFor(request, env.CORE_ORIGIN);
             const doc = document(new Request(url, { method: 'GET' }), env, url);
             if (doc) {

@@ -1,6 +1,6 @@
 # Operating the native core
 
-4 November 2026. Local rehearsal and operator tooling; **nothing deployed or
+5 November 2026. Local rehearsal and operator tooling; **nothing deployed or
 scheduled**. Production remains gated on backup custody, reconciliation,
 report handling, seed keys and a deployed-preview check.
 
@@ -10,10 +10,10 @@ The runner needs Node 24, but not workerd. Configure a distinct `BACKUP_TOKEN`
 Worker secret: 32 random bytes encoded as 64 lowercase hex characters. Give the
 runner that value through its secret manager as `SPRIG_BACKUP_TOKEN`. Keep
 `ADMIN_TOKEN` elsewhere. Never pass credentials in command arguments or URLs.
-The backup credential can close epochs and export all retained content, including
-suppressed content. It cannot pause, suppress, inspect arbitrary tables, restore
-or release a namespace. Its holder can still consume export resources and create
-cuts; rotate it if compromised. This is a recovery credential, not a public reader.
+The backup credential can read checkpoint headers and export retained content,
+including suppressed content. It cannot mutate state, inspect arbitrary tables,
+restore or release a namespace. Its holder can still consume export resources;
+rotate it if compromised. This is a privileged recovery reader.
 
 Run on a separate machine or provider, with directories already created:
 
@@ -28,20 +28,21 @@ npm run backup:core -- check /backups/sprig/2026-11-03.jsonl \
 ```
 
 Both files are created exclusively, mode 0600, synced and never overwritten.
-The version-2 witness pins origin, journal identity, epoch, starting/ending
+The version-3 witness pins origin, journal identity, starting/ending
 positions, predecessor digest, final digest and record count. Keep its trusted
 copy under different credentials/custody from the archive and primary service.
 Different directories are required to discourage accidental bundling; **they do
 not establish independent custody**. No signature from the runner or host is
 implied. A compromised exporter can supply a false history before you pin it.
 
-The command prints the closed epoch before copying. If export fails after that,
-use a fresh destination and `--epoch N` to copy the same cut. An ambiguous failed
-cut request must be reconciled through operator inspection of `cuts`; the client
-does not automatically POST another cut. A witness failure leaves the completed
-archive in place and reports `archive_saved_but_witness_failed`. Investigate and
-pin it through a trusted process, or export the same epoch to two fresh paths.
-A `.partial` file left by a killed process is not a completed archive.
+The command prints the captured journal position before copying. A failed request
+has no backup side effects to reconcile. Retry capture with fresh output paths;
+the new checkpoint may include later writes. Programmatic callers can retain the
+exact header and pass it to `backup`/`capture` to recopy that prefix. A witness
+failure preserves the completed archive and reports
+`archive_saved_but_witness_failed`; investigate and pin it through a trusted
+process, or capture again to two fresh paths. A `.partial` file left by a killed
+process is not a completed archive.
 
 Set a scheduler on the independent runner, use unique paths per attempt, prevent
 overlapping jobs and alert on failures/missing witnesses. Do not auto-delete old
@@ -57,15 +58,16 @@ npm run backup:core -- capture https://sprig.run /backups/sprig/delta-1.jsonl \
 # Next time, use delta-1 and its witness as the base; keep the entire chain.
 ```
 
-The base file and independently trusted witness are checked before creating a
-cut. Each increment binds the exact preceding cut and digest, including its
+The base file and independently trusted witness are checked before reading a
+checkpoint. Each increment binds the exact preceding checkpoint and digest, including its
 journal identity. Retain the full snapshot and every link, not merely the newest
 delta. Plan periodic full copies: recovery preflight accepts at most 1,024 files.
 An hourly interval with weekly full copies stays well within that bound. A failed
 or missing scheduled copy must alert; this code installs no scheduler or replica.
 R2 plus SQL point-in-time recovery alone is not a coherent independent backup.
 
-The exporter streams a closed epoch while new submissions continue in the next.
+The exporter reads the captured prefix while new submissions continue. Capturing
+a checkpoint writes no row, advances no counter and pauses no commit.
 Responses examine at most 32 ordered journal records, with a soft 512 KiB encoded-response
 budget; one valid oversized record is allowed. Each included source body needs one verified R2 read; a delta includes only
 newly accepted sources. Later history cannot lengthen the closed-prefix scan. The client bounds each complete HTTP response and times out
@@ -93,16 +95,16 @@ profile retains the production 30-attempt and 120-read burst capacities, with
 negligible refill for reproducibility. Existing HTTP tests cover eight concurrent
 uploads and stalled-body deadlines. This is **not a production throughput test**.
 
-Measured on Linux/Node 24.22.1 with schema 4 (4 November 2026),
+Measured on Linux/Node 24.22.1 with schema 7 (5 November 2026),
 128 accepted actions per case:
 
 | Action | SQLite bytes/action | R2 PUT/action | R2 GET/action |
 | --- | ---: | ---: | ---: |
-| New 32 KiB source | 1,632 | 1 | 0 |
+| New 32 KiB source | 1,536 | 1 | 0 |
 | Exact source retry | 0 | 0 | 0 |
 | Anonymous 1 KiB chat | 2,400 | 0 | 0 |
 | Signed 1 KiB chat, plot author | 2,368 | 0 | 1 |
-| Short publication reference | 1,024 | 0 | 0 |
+| Short publication reference | 928 | 0 | 0 |
 | Long publication path | 3,936 | 0 | 0 |
 
 These are page-allocation deltas in a small local sample, not per-row billing or
@@ -110,11 +112,12 @@ worst-case bounds. Path length, message size, insertion order, page utilization,
 keys, signatures and future schema changes matter. The long path uses seven
 32-character topic components plus the final topic. The cost model leaves SQL
 allocation estimates editable and defaults above the short-path observations.
-Against the earlier schema-2 sample, this is about 512 extra bytes/source,
-160 bytes/chat and 128 bytes/short publication. The added journal stores pointers,
-not duplicate payloads. These are observations across samples, not fixed overhead
-bounds or provider row-operation measurements. The editable model's 2 KiB source
-metadata and 2 KiB chat overhead defaults still exceed the short-path samples.
+Compared with the preceding schema-4 sample, sources and short publications
+used about 96 fewer SQLite bytes per action; other sampled cases were unchanged.
+The journal stores pointers, not duplicate payloads. These observations are not
+fixed overhead bounds or provider row-operation measurements. The editable
+model's 2 KiB source metadata and 2 KiB chat overhead defaults still exceed the
+short-path samples.
 The archive copies each source body once per full backup, and once when it first
 appears in an increment. JSON escaping can still enlarge the file estimate.
 The rehearsal also saw exactly 30 accepted/10 refused POSTs and 120 accepted/20
@@ -133,7 +136,7 @@ This setting is operational, not part of portable quota policy or archive bytes.
 Public admission, source reservation and final acceptance each check physical
 SQLite size before/after their transaction. An over-limit transaction rolls back;
 an in-flight request cannot bypass the later check. Operator moderation, pause,
-cuts and recovery retain access to the remaining provider capacity. Reads and
+and recovery retain access to the remaining provider capacity. Reads and
 receipt GETs remain available. A private source already prepared in R2 can remain
 reserved if final acceptance is refused, as for other interrupted writes.
 Restore can exceed the public cutoff but remains quarantined/paused; inspect size
@@ -143,9 +146,10 @@ well below the provider limit and investigate growth before reaching it.
 
 ### First public preview
 
-Use the existing single-shard Worker. Keep the cluster implementation and loss
-drills as a tested growth path; public sharded routing and collection movement
-are deferred. Before opening writes, choose and rehearse independent backup
+Use the single-database Worker. The epoch/cluster experiment and loss drills are
+preserved on [reference/epoch-core-2026-11-05](https://github.com/nickjhay/sprigrun/tree/reference/epoch-core-2026-11-05).
+Future shards can have weaker cross-shard consistency and independent checkpoints;
+colocate relationships needing atomicity. Placement and writer movement are deferred. Before opening writes, choose and rehearse independent backup
 custody/cadence, reporting operations, seed key custody and the recovery promise.
 An asynchronous backup cannot reveal an unknown newer acknowledged suffix. Do
 not resume old numbered collections from an uncertain prefix and silently reuse
@@ -206,7 +210,7 @@ provider transfer/minimum charges need separate care.
 Archive size is an estimate (JSON escaping can enlarge text). SQL allocation and
 row operations are estimates; moderation history, large name trees and reserved-source
 backlog need additional scenarios. Effective batch size depends on record sizes;
-`--metadata-batch 1` is a conservative small-batch comparison. The journal-position bound excludes post-cut
+`--metadata-batch 1` is a conservative small-batch comparison. The journal-position bound excludes post-checkpoint
 history without scanning it.
 
 A quota is not a dollar cap. Public requests rejected by our Worker/DO can still
@@ -223,8 +227,9 @@ Official references, checked 3 November 2026:
 - [SQLite storage API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
 
 
-Policy changes and pause/cut operations have their own small journal entries.
+Policy changes and pause operations have their own small journal entries.
 They do not add R2 operations to source POSTs. New signed admissions perform
 indexed author-block checks. Model unusually frequent operator policy changes
-separately from public growth; cuts at the selected backup intervals are included.
+separately from public growth. Backup checkpoints add no primary SQL writes or
+stored journal facts; the cost model includes their read requests and archive headers.
 The fixed per-action allowance is not a provider bill.
