@@ -8,6 +8,7 @@ import { backup, restore, verify, lines } from '../scripts/recover.mjs';
 import { action, drillPolicy, origin, plant } from '../scripts/recovery-garden.mjs';
 import { canonical, initial, advance, parseLine } from '../host/archive.ts';
 import { textBytes, utf8 } from '../src/bytes.ts';
+import { signAction } from '../src/authority.ts';
 import { parseReceipt } from '../src/receipt.ts';
 
 let scratch, archive, saved, garden, all, serial = 0;
@@ -45,7 +46,7 @@ test('loss of SQLite and R2: restore exact receipts, authority, times and suppre
   const state = await c.stats();
   assert.equal(state.epoch, '1'); assert.equal(state.paused, true);
   for (const k of ['growth', 'burst', 'attempts']) assert.equal(state[k].tokens, 0);
-  for (const k of ['accepted', 'reservedBytes', 'acceptedDebit']) assert.equal(state[k], saved.header.control[k]);
+  for (const k of ['moderation', 'accepted', 'reservedBytes', 'acceptedDebit']) assert.equal(state[k], saved.header.control[k]);
   await assert.rejects(c.read(garden.source), /recovery_mode/);
   await assert.rejects(c.pause(false), /recovery_mode/);
   await assert.rejects(c.restoreRelease(saved.footer.chain, 'yes'), /restore_history_confirmation/);
@@ -66,6 +67,9 @@ test('loss of SQLite and R2: restore exact receipts, authority, times and suppre
     }
   }
   await assert.rejects(host.core.latest('/chat' + garden.grove), /suppressed/);
+  const blocked = action(garden.chat, 'New signed action after restore.', garden.plot);
+  await assert.rejects(host.core.submit(blocked, await signAction(blocked, garden.pair.privateKey, origin)), /author_blocked/);
+  assert.equal((await host.core.policyStatus()).applied, saved.header.control.moderation);
   const receipt = await host.core.submit(action(garden.hidden, 'After recovery.'));
   assert.equal(parseReceipt(textBytes(receipt), origin).result, origin + '/chat' + garden.grove + '/2');
   const again = join(scratch, 'second-generation.jsonl');
@@ -162,6 +166,7 @@ test('a cut stays stable after later appends, visibility changes and other cuts;
   const planted = await plant(core), epoch = await core.cut();
   const headerBefore = await core.snapshotHeader(epoch);
   await core.suppress(planted.hidden, false);
+  await core.blockAuthor(planted.key, false);
   for (let i = 0; i < 40; i++) await core.submit(action('/grove/aaa_' + i, planted.source + '\n'));
   await core.cut();
   const first = await core.snapshotPage(epoch, 'results', '/grove/');
@@ -170,7 +175,9 @@ test('a cut stays stable after later appends, visibility changes and other cuts;
   const b = await backup(core, file, epoch), rows = [];
   for await (const line of lines(file)) rows.push(parseLine(line));
   assert.equal(rows.filter(r => r.type === 'results').length, 7);
-  assert.equal(rows.filter(r => r.type === 'suppressions' && r.row.path === planted.hidden).length, 1);
+  assert.equal(rows.filter(r => r.type === 'moderation' && r.row.path === planted.hidden).length, 1);
+  const block = rows.filter(r => r.type === 'moderation' && r.row.effect === 'block');
+  assert.equal(block.length, 1); assert.equal(block[0].row.active, 1);
   const recovered = await target(t);
   assert.equal((await restore(recovered, file, b.footer.chain)).phase, 'restored');
   assert.equal(await core.snapshotHeader(epoch), headerBefore);
@@ -245,4 +252,20 @@ test('restoration retains first-publication ownership of the receipt, including 
   assert.equal(await host.core.submit(signed, signature), receipt);
   assert.equal((await host.core.evidence(result)).receipt, receipt);
   assert.equal((await host.core.stats()).acceptedDebit, before.acceptedDebit);
+});
+
+
+test('missing and repeated policy facts cannot be hidden by recomputing the archive checksum', async t => {
+  const missing = await changed(rows => {
+    const at = rows.findLastIndex(r => r.type === 'moderation'); rows.splice(at, 1);
+  });
+  await assert.rejects(verify(missing.file, missing.footer.chain), /archive_accounting/);
+  const repeated = await changed(rows => {
+    const policies = rows.filter(r => r.type === 'moderation');
+    policies[2].row.active = policies[1].row.active; // Same plot hide decision twice.
+  });
+  await verify(repeated.file, repeated.footer.chain);
+  const core = await target(t);
+  await assert.rejects(restore(core, repeated.file, repeated.footer.chain), /archive_policy_repeated_or_rewound/);
+  await assert.rejects(core.read(garden.source), /recovery_mode/);
 });

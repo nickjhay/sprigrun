@@ -101,9 +101,13 @@ R2 must remain private. An object's presence alone never makes it readable.
 The accepted journal and current suppression gate all adapter reads, including
 evidence. R2 reads check size before buffering and digest before returning; reads
 recheck visibility after asynchronous I/O. Publication aliases check their source
-and plot; chat messages check their subject. Suppressing a key prevents new
-actions using it and hides evidence containing its bytes. It does not erase
-already accepted authored messages or their consumed action IDs.
+and plot; chat messages check their subject. Hiding a key hides evidence containing
+its bytes, but does not block its use for signing. Internal authority resolution
+uses retained accepted facts, independently of public visibility. Blocking a key
+prevents new actions through all its author aliases; historical signatures and
+messages remain readable unless separately hidden. Exact authorized retries can
+return their original receipt after a block, subject to content visibility.
+Neither effect erases consumed action IDs.
 
 `latest` selects the greatest committed entry and checks its visibility. It
 reports unavailable if suppressed; it never quietly selects an older entry.
@@ -125,7 +129,7 @@ N+1. The retained reservation records when private allowance was paid; publicati
 records when the value became public. Tests hold an actual R2 PUT while making
 the cut. There is no claim about a particular production latency yet.
 
-Committed results, suppression changes and cuts retain their epochs. Sources
+Committed results, moderation changes and cuts retain their epochs. Sources
 retain only preparation facts; the result row supplies the publication epoch/time.
 The exporter joins them at the cut and copies exact bytes, action evidence, timestamps,
 quota control and consumption identities. The restore target validates the archive
@@ -151,3 +155,33 @@ The transaction API follows Cloudflare's
 `transactionSync` rolls back on an exception, and `sync` awaits pending durability.
 Tests inject faults into this implementation, rather than maintaining an
 independent in-memory acceptance model.
+
+## Logical owners and eventual policy
+
+`placement.owner()` maps source values to their `/sea/H_L` identity and numbered
+results to their allocation collection. `/receipt`, `/action` and `/evidence`
+map to the same owner as their result. `POST /sea` has no owner until bounded
+intake and hashing have identified the value. Public identities contain no
+physical shard ID. All owners still use the single `core` Durable Object.
+
+`moderation` contains ordered `hide` and `block` facts. The control count is
+advanced in the same transaction; repeated unchanged decisions add nothing.
+An index on effect/path/position supplies current decisions without a duplicate
+mutable projection table. A snapshot captures the applied position as well as the epoch. Late catch-up
+with an older policy issue epoch cannot enter that already closed prefix.
+Ordinary GETs do not write policy state. This is an
+operator-controlled history, not a public append endpoint.
+
+The local authority applies changes immediately. `PolicyFollower` is a tested
+host-independent catch-up component for the later shard adapter: one batch of
+at most 32 per tick, a 60-second refresh/backoff target, coalesced concurrent
+refreshes, and a durable cursor supplied by the journal. The transport must be
+trusted and deadline-bounded. There is no running remote poller or second shard
+yet. Stale policy can admit an action; a later content hide cleans it up without
+rewriting the accepted receipt. This is not instantaneous key revocation.
+
+A follower applies changes and its cursor in one transaction, then syncs before
+acknowledging. Gaps, conflicting duplicates, future/backwards epochs and invalid
+schemas fail. Identical delayed delivery never rewinds a decision. The policy
+cursor is internal; it is not a global order of public submissions. The operator
+feed and status are available at `/admin/policy?after=0`.

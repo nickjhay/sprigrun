@@ -46,7 +46,7 @@ PUTs may add a GET. Restored SQL rows, heads and import progress also incur writ
 These are operator costs proportional to the retained history, so backup and
 restore traffic need their own operational budget and access controls.
 
-The format is canonical JSON Lines, `sprig-native-snapshot/2`: a header, ordered
+The format is canonical JSON Lines, `sprig-native-snapshot/3`: a header, ordered
 records, then an exact count and SHA-256 chain. The maximum physical line is
 2 MiB, allowing escaped control characters in a maximum-sized UTF-8 source.
 Every number that could exceed JavaScript integer precision stays decimal text.
@@ -58,8 +58,12 @@ an existing destination is never overwritten.
 | Source reservation | Original size, debit, epoch and reservation time | Failed or abandoned uploads still used allowance |
 | Published source bytes | Exact UTF-8 body beside its reservation; copied only if a result exists at the cut | Hash verification survives; private preparations remain private |
 | Committed result | Path, kind, placement/controller, action, body/source, epoch/time, debit, signature evidence and original receipt | One authoritative result/receipt; uniqueness, numbering and verification survive |
-| Suppression | Complete revision history through the cut | Restoring cannot quietly expose a suppressed result |
+| Moderation | Complete ordered hide/block history through the applied position captured at the cut | Restoring cannot quietly expose hidden content or unblock an author |
 | Cut/control | Origin, epoch, policy, counters and bucket state | Historical accounting and earlier boundaries remain available |
+
+Moderation export uses the captured applied position, not just the policy issue
+epoch: delayed delivery of an older policy cannot change a closed snapshot.
+The contiguous history must match the header count.
 
 `heads` is rebuilt as the maximum committed number per collection. The current
 allocator changes a head only in the same transaction as its entry, so entries
@@ -111,7 +115,7 @@ Before completion the target checks:
 - referenced sources, authors, subjects, anchors and publication ownership;
 - one result per path and accepted action, exact receipt correspondence, and
   a copied body for every published source (with no orphan copied bodies);
-- contiguous suppression revisions and snapshot cuts.
+- contiguous moderation positions and snapshot cuts.
 
 This validates retained evidence and internal consistency. It cannot authenticate
 an unsigned host receipt or reconstruct a globally ordered history inside an
@@ -163,21 +167,21 @@ independent backups and establish trusted-digest custody, exercise an operationa
 suffix-reconciliation procedure, configure report/suppression handling, and set
 provider protections and capacity monitoring. The old store's recovery tools do not understand this schema.
 
-## Schema 2 transition (before deployment)
+## Schema 3 transition (before deployment)
 
-This version uses database schema 2 and archive `sprig-native-snapshot/2`.
-Opening schema 1 fails before any schema changes; importing a v1 archive fails
+This version uses database schema 3 and archive `sprig-native-snapshot/3`.
+Opening schema 1 or 2 fails before any schema changes; importing a v1/v2 archive fails
 with `archive_version`. No local data is deleted or silently migrated.
 
 Keep an old directory/archive intact. To try the new core explicitly:
 
 ```sh
-npm run dev:core -- --state .local/native-http-v2 --operator
+npm run dev:core -- --state .local/native-http-v3 --operator
 ```
 
 For the previous reader/implementation, use a separate checkout of commit
-`353ad7fbdd212f1c5541d3c2ae6b37744e6acdb3` (PR #19), including its lockfile.
-Do not feed a v1 archive into the new restore target or reopen its directory with
+`458e572e3f435c45da37e245b6d89525ceb810b4` (PR #20), including its lockfile.
+Do not feed a v1/v2 archive into the new restore target or reopen its directory with
 a new identity. No production migration is needed yet; a conversion tool is not
 part of this change. Public action/key/plot/receipt formats remain version 1;
 the database/archive version bump does not rewrite signed bytes or old receipts.

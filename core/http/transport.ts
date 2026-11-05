@@ -140,7 +140,7 @@ export function failure(error: unknown): Response {
     }
     else if (['bytes_limit', 'source_size_limit', 'chat_size_limit'].includes(code))
         status = 413;
-    else if (['wrong_controller', 'author_required', 'signature_required', 'invalid_signature', 'signature_verification_failed'].includes(code))
+    else if (['author_blocked', 'wrong_controller', 'author_required', 'signature_required', 'invalid_signature', 'signature_verification_failed'].includes(code))
         status = 403;
     else if (code === 'invalid_utf8')
         status = 422;

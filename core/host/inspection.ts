@@ -125,18 +125,7 @@ export class Inspection {
             }>(`SELECT value FROM ${table} WHERE id=1`).toArray();
             return { table, rows: rows.map(r => JSON.parse(r.value)), after: '', more: false };
         }
-        const keys: Record<string, string> = { sources: 'address', heads: 'collection', results: 'path', cuts: 'epoch', recovery_sources: 'address' };
-        if (table === 'suppressions') {
-            const parts = after ? after.split('!') : ['', ''];
-            check(parts.length === 2, 'invalid_cursor');
-            const rows = this.db.sql.exec<{
-                path: string;
-                revision: string;
-            }>(`SELECT * FROM suppressions
-        WHERE (path, revision)>(?, ?) ORDER BY path,revision LIMIT ?`, parts[0]!, parts[1]!, PAGE_SIZE).toArray();
-            const last = rows.at(-1);
-            return { table, rows, after: last ? last.path + '!' + last.revision : after, more: rows.length === PAGE_SIZE };
-        }
+        const keys: Record<string, string> = { sources: 'address', heads: 'collection', results: 'path', moderation: 'position', cuts: 'epoch', recovery_sources: 'address' };
         const key = Object.hasOwn(keys, table) ? keys[table]! : null;
         check(key, 'invalid_table');
         // Large bodies/evidence have a dedicated single-record endpoint, not 32 copies per table page.

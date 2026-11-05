@@ -3,12 +3,13 @@ import { verifyAction, plotBindingBytes } from '../src/authority.ts';
 import { receiptForAction } from '../src/receipt.ts';
 import { formatReference, parseReference } from '../src/references.ts';
 import { State, type Control, type Result } from './state.ts';
+import { Moderation, type PolicyChange } from './moderation.ts';
 import type { Policy } from './policy.ts';
 import { at, bodyValue, collection } from './placement.ts';
 import { loadSource, putSource } from './objects.ts';
 import { advance, canonical, complete, cutHeader, digest, end, initial, PAGE_SIZE,
   parseLine, TABLES, validateHeader, validateRecord,
-  type Cut, type End, type Header, type Progress, type Record, type Suppression, type Table } from './archive.ts';
+  type Cut, type End, type Header, type Progress, type Record, type Table } from './archive.ts';
 
 type Session = { phase: 'starting' | 'importing' | 'verifying' | 'restored' | 'released'; header: Header; footer: End;
   progress: Progress; lastHash: string | null; verifiedThrough: string };
@@ -32,21 +33,15 @@ export class Recovery {
 
   /** Bound rows EXAMINED, even if most belong to later epochs. No payload reads. */
   page(epoch: string, table: string, after: string) {
-    this.cut(epoch); this.table(table);
+    const h = cutHeader(this.cut(epoch)); this.table(table);
     check(typeof after === 'string' && after.length <= 1024, 'archive_cursor');
     let rows: { key: string; epoch: string }[];
-    if (table === 'suppressions') {
-      const [path, revision] = after === '' ? ['', ''] : after.split('!');
-      check(path !== undefined && revision !== undefined && after.split('!').length <= 2, 'archive_cursor');
-      rows = this.db.sql.exec<{ key: string; epoch: string }>(`SELECT path || '!' || revision AS key, epoch
-        FROM suppressions WHERE (path, revision) > (?, ?) ORDER BY path, revision LIMIT ?`, path, revision, PAGE_SIZE).toArray();
-    } else {
-      const key = { sources: 'address', results: 'path', cuts: 'epoch' }[table];
-      const time = table === 'sources' ? 'reserved_epoch' : 'epoch';
-      rows = this.db.sql.exec<{ key: string; epoch: string }>(
-        `SELECT ${key} AS key, ${time} AS epoch FROM ${table} WHERE ${key} > ? ORDER BY ${key} LIMIT ?`, after, PAGE_SIZE).toArray();
-    }
-    return { keys: rows.filter(r => r.epoch <= orderedU64(epoch)).map(r => r.key),
+    const key = { sources: 'address', results: 'path', moderation: 'position', cuts: 'epoch' }[table];
+    const time = table === 'sources' ? 'reserved_epoch' : 'epoch';
+    rows = this.db.sql.exec<{ key: string; epoch: string }>(
+      `SELECT ${key} AS key, ${time} AS epoch FROM ${table} WHERE ${key} > ? ORDER BY ${key} LIMIT ?`, after, PAGE_SIZE).toArray();
+    return { keys: rows.filter(r => table === 'moderation'
+      ? r.key <= orderedU64(h.control.moderation) : r.epoch <= orderedU64(epoch)).map(r => r.key),
       after: rows.at(-1)?.key ?? after, done: rows.length < PAGE_SIZE };
   }
   /** Metadata only: no speculative R2 GET when the reply budget fills. */
@@ -76,9 +71,8 @@ export class Recovery {
         ? utf8(await loadSource(this.bucket, key)) : null };
     } else if (table === 'results') {
       const row = this.db.result(key); check(row, 'snapshot_record_unavailable'); record = { type: table, row };
-    } else if (table === 'suppressions') {
-      const parts = key.split('!'); check(parts.length === 2, 'archive_cursor');
-      const row = this.db.sql.exec<Suppression>('SELECT * FROM suppressions WHERE path=? AND revision=?', parts[0]!, parts[1]!).toArray()[0];
+    } else if (table === 'moderation') {
+      const row = this.db.sql.exec<PolicyChange>('SELECT * FROM moderation WHERE position=?', key).toArray()[0];
       check(row, 'snapshot_record_unavailable'); record = { type: table, row };
     } else record = { type: table, row: this.cut(String(BigInt(key))) };
     await validateRecord(record, h);
@@ -95,7 +89,7 @@ export class Recovery {
       const progress = await initial(header);
       this.ctx.storage.transactionSync(() => {
         const c = this.db.control();
-        check(c.epoch === '0' && c.accepted === '0' && c.reservedBytes === '0' && c.acceptedDebit === '0', 'restore_requires_empty_target');
+        check(c.epoch === '0' && c.moderation === '0' && c.accepted === '0' && c.reservedBytes === '0' && c.acceptedDebit === '0', 'restore_requires_empty_target');
         for (const table of [...TABLES, 'heads', 'recovery_sources'])
           check(this.db.sql.exec(`SELECT 1 FROM ${table} LIMIT 1`).toArray().length === 0, 'restore_requires_empty_target');
         s = { phase: 'starting', header, footer, progress, lastHash: null, verifiedThrough: '' };
@@ -172,10 +166,11 @@ export class Recovery {
       await putSource(this.bucket, record.row.address, textBytes(record.body));
     this.ctx.storage.transactionSync(() => {
       const r = record.row;
-      if (record.type === 'suppressions') {
-        const v = record.row, previous = this.db.suppression(v.path);
-        check(v.revision === orderedU64(previous ? nextU64(String(BigInt(previous.revision))) : '0'), 'archive_suppression_gap');
-        check(!previous || previous.suppressed !== v.suppressed, 'archive_repeated_suppression');
+      if (record.type === 'moderation') {
+        const v = record.row, previous = new Moderation(this.db).decision(v.effect, v.path);
+        check(!previous || (previous.active !== v.active && previous.epoch <= v.epoch), 'archive_policy_repeated_or_rewound');
+        const last = this.db.sql.exec<{ epoch: string }>('SELECT epoch FROM moderation ORDER BY position DESC LIMIT 1').toArray()[0];
+        check(!last || last.epoch <= v.epoch, 'archive_policy_epoch_rewound');
         if (parseReference(v.path).kind !== 'sea') this.existing(v.path, v.epoch);
       }
       if (record.type === 'cuts' && r.epoch === orderedU64(s.header.epoch))

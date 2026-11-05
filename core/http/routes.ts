@@ -140,6 +140,10 @@ async function operatorRoute(request: Request, env: Env, core: NativeCoordinator
             const data = core.operatorInspect(table, p.get('after') ?? '');
             return htmlView(p) ? operatorPage(env, table, data, nextLink(url, data.after, data.more)) : json(data);
         }
+        if (path === '/admin/policy') {
+            query(url, ['after']);
+            return json({ ...core.policyPage(p.get('after') ?? '0'), status: core.policyStatus() });
+        }
         if (path === '/admin/recovery/status') {
             query(url, []);
             return json(core.restoreStatus());
@@ -171,7 +175,7 @@ async function operatorRoute(request: Request, env: Env, core: NativeCoordinator
     if (!operator(request, env.ADMIN_TOKEN) && !backupAccess(request, env, path))
         throw new HttpError(404, 'not_found');
     const max = path === '/admin/restore/record' ? MAX_LINE : path === '/admin/restore/begin' ? 65536 : 2048;
-    const known = ['/admin/pause', '/admin/suppress', '/admin/cut', '/admin/restore/begin', '/admin/restore/record', '/admin/restore/finish', '/admin/restore/release'];
+    const known = ['/admin/pause', '/admin/suppress', '/admin/block-author', '/admin/cut', '/admin/restore/begin', '/admin/restore/record', '/admin/restore/finish', '/admin/restore/release'];
     if (!known.includes(path))
         throw new HttpError(404, 'not_found');
     query(url, path === '/admin/restore/record' ? ['index'] : []);
@@ -198,6 +202,11 @@ async function operatorRoute(request: Request, env: Env, core: NativeCoordinator
         fields(value, ['path', 'suppressed']);
         await core.suppress(value.path, value.suppressed);
         return json({ path: value.path, suppressed: value.suppressed });
+    }
+    if (path === '/admin/block-author') {
+        fields(value, ['key', 'blocked']);
+        await core.blockAuthor(value.key, value.blocked);
+        return json({ key: value.key, blocked: value.blocked });
     }
     if (path === '/admin/restore/begin') {
         fields(value, ['header', 'footer']);

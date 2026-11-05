@@ -73,6 +73,8 @@ export function nativeClient(origin, { token, fetcher = fetch, timeoutMs = 30000
         restoreRelease: async (chain, confirmation) => JSON.parse(await post('/admin/restore/release', JSON.stringify({ chain, confirmation }))),
         pause: async (paused) => JSON.parse(await post('/admin/pause', JSON.stringify({ paused }))),
         suppress: async (path, suppressed) => JSON.parse(await post('/admin/suppress', JSON.stringify({ path, suppressed }))),
+        blockAuthor: async (key, blocked) => JSON.parse(await post('/admin/block-author', JSON.stringify({ key, blocked }))),
+        policyPage: async (after = '0') => JSON.parse(await get('/admin/policy?' + qs({ after }))),
         inspect: async (table, after = '') => JSON.parse(await get('/admin/inspect?' + qs({ table, after }))),
     };
 }

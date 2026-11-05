@@ -153,7 +153,7 @@ Independent storage/transfer, taxes, domains, frontend, WAF, logs and restores a
 excluded by default. `--backup-gb-price` and `--backup-copies` add a rough retained
 archive-storage allowance; provider transfer/minimum charges need separate care.
 Archive size is an estimate (JSON escaping can enlarge text). SQL allocation and
-row operations are estimates; suppressions, large name trees and reserved-source
+row operations are estimates; moderation history, large name trees and reserved-source
 backlog need additional scenarios. Effective batch size depends on record sizes;
 `--metadata-batch 1` is a conservative small-batch comparison. Growing post-cut
 history can require extra empty filtered pages during export.
@@ -170,3 +170,11 @@ Official references, checked 3 November 2026:
 - [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)
 - [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/)
 - [SQLite storage API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
+
+
+The allocation samples above were taken on schema 2. Schema 3 adds an indexed
+operator policy history and one control count; it still writes no policy data
+for ordinary views or publications, and adds no R2 operations to source POSTs.
+New signed admissions perform indexed author-block checks. Policy changes are
+operator-only and have their own stored history; model their volume separately
+from public content growth. The fixed per-action allowance is not a provider bill.

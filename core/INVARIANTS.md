@@ -31,7 +31,9 @@
   in acceptance. HTTP body reception shares the eight active slots and attempt
   debit; actual byte count and total deadline bound each application reader.
 - Resolve plot author bindings from trusted retained history. Check target
-  authority and current suppression inside the eventual acceptance boundary.
+  authority, content visibility and author admission inside the local acceptance boundary.
+  Hiding a retained key never changes its verification authority; author blocks
+  only prevent new actions. Exact retries still obey receipt visibility.
 - An anchor must exist in that collection. A valid old anchor allows intervening
   commits; a future/gap anchor rejects. GET creates no state.
 - Atomically commit the action's unique identity, next never-reused collection
@@ -56,8 +58,8 @@
 
 - Copy a closed epoch while later commits continue. Project private preparations
   at the cut; preserve their debit without requiring unpublished bytes.
-- Restore times, numbers, accounting, key evidence, receipts and suppression
-  together. Match every entry and published source to retained acceptance.
+- Restore times, numbers, accounting, key evidence, receipts, content hiding and author blocks
+  together. The archived moderation count must match its contiguous history. Match every entry and published source to retained acceptance.
 - Verify source hashes, exact action/receipt correspondence, signature evidence,
   authority and referenced facts before completing the import.
 - Commit each imported record with its resume cursor. A repeated acknowledgement
@@ -100,3 +102,17 @@ is needed for the first public core.
 Before public release, establish a recovery procedure, calibrate metadata/traffic
 limits and costs, and establish report/suppression and independent backup
 operations. The protocol demo and frozen fixtures make none of those claims.
+
+## Logical-owner and policy obligations
+
+- Result, receipt and evidence paths derive the same stable logical owner. Source
+  preparation stays with that source; numbered results stay with their collection.
+  This version still has one physical coordinator and no cross-shard resolver.
+- Policy application and cursor updates commit together. Gaps/conflicting history
+  reject; a delayed identical change cannot replace a newer decision.
+- Refresh work is bounded to 32 changes per tick, coalesces concurrent calls and
+  backs off unavailable upstreams. The local authority requires no poller.
+- A block does not hide historical signatures. A hide does not revoke signing
+  authority. Public evidence and exact-retry receipts cannot bypass hiding.
+- Direct result reads use retained accepted state, never a discovery listing as
+  proof of acceptance. Future cross-owner reads must retain this trust boundary.

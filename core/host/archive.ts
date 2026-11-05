@@ -6,24 +6,24 @@ import { parsePlotBinding } from '../src/authority.ts';
 import { parseAction } from '../src/action.ts';
 import { parseReceipt } from '../src/receipt.ts';
 import { collection } from './placement.ts';
+import { validateChange, type PolicyChange } from './moderation.ts';
 import { policy, type Policy } from './policy.ts';
 import type { Control, Result, Source } from './state.ts';
 
-export const FORMAT = 'sprig-native-snapshot/2';
+export const FORMAT = 'sprig-native-snapshot/3';
 export const MAX_LINE = 2 * 1024 * 1024;
 export const PAGE_SIZE = 32;
-export const TABLES = ['sources', 'results', 'suppressions', 'cuts'] as const;
+export const TABLES = ['sources', 'results', 'moderation', 'cuts'] as const;
 export type Table = typeof TABLES[number];
-export type Suppression = { path: string; revision: string; epoch: string; suppressed: number; at_ms: string };
 export type Cut = { epoch: string; control: string; at_ms: string };
 export type Header = { type: 'header'; format: typeof FORMAT; epoch: string; capturedAtMs: string;
   control: Control; policy: Policy };
 export type Record = { type: 'sources'; row: Source; body: string | null }
   | { type: 'results'; row: Result }
-  | { type: 'suppressions'; row: Suppression } | { type: 'cuts'; row: Cut };
+  | { type: 'moderation'; row: PolicyChange } | { type: 'cuts'; row: Cut };
 export type End = { type: 'end'; count: string; chain: string };
 export type Progress = { count: string; chain: string; order: string;
-  accepted: string; debit: string; reserved: string; bodies: string; published: string; cuts: string };
+  moderation: string; accepted: string; debit: string; reserved: string; bodies: string; published: string; cuts: string };
 
 export function fields(value: unknown, names: readonly string[]): asserts value is { [key: string]: any } {
   check(value !== null && typeof value === 'object' && !Array.isArray(value), 'archive_fields');
@@ -68,9 +68,9 @@ export function validatePolicy(value: unknown): Policy {
   return policy(value as Policy);
 }
 export function validateControl(value: unknown): Control {
-  fields(value, ['schema', 'origin', 'epoch', 'paused', 'growth', 'burst', 'attempts', 'accepted', 'reservedBytes', 'acceptedDebit']);
-  check(value.schema === 2 && typeof value.paused === 'boolean', 'archive_control');
-  canonicalOrigin(value.origin); u64(value.epoch); u64(value.accepted);
+  fields(value, ['schema', 'origin', 'epoch', 'paused', 'growth', 'burst', 'attempts', 'moderation', 'accepted', 'reservedBytes', 'acceptedDebit']);
+  check(value.schema === 3 && typeof value.paused === 'boolean', 'archive_control');
+  canonicalOrigin(value.origin); u64(value.epoch); u64(value.accepted); u64(value.moderation);
   decimal(value.reservedBytes); decimal(value.acceptedDebit);
   for (const name of ['growth', 'burst', 'attempts']) {
     fields(value[name], ['tokens', 'atMs', 'remainder']);
@@ -102,8 +102,7 @@ export function recordKey(record: Record): string {
   switch (record.type) {
     case 'sources': return record.row.address;
     case 'results': return record.row.path;
-    // '!' sorts before every path character, preserving tuple order for prefixes.
-    case 'suppressions': return record.row.path + '!' + record.row.revision;
+    case 'moderation': return record.row.position;
     case 'cuts': return record.row.epoch;
   }
 }
@@ -156,11 +155,9 @@ export async function validateRecord(value: unknown, h: Header): Promise<Record>
     smallText(a.receipt, LIMITS.recordBytes); parseReceipt(textBytes(a.receipt), h.control.origin);
     for (const v of [a.key_record, a.author_binding]) if (v !== null) smallText(v, LIMITS.recordBytes);
     if (a.signature !== null) smallText(a.signature, 86);
-  } else if (r.type === 'suppressions') {
-    const s = r.row;
-    fields(s, ['path','revision','epoch','suppressed','at_ms']);
-    const ref = parseReference(s.path); check(ref.kind !== 'chat' && ref.kind !== 'step', 'archive_suppression');
-    padded(s.revision); check(s.suppressed === 0 || s.suppressed === 1, 'archive_suppression'); u64(s.at_ms);
+  } else if (r.type === 'moderation') {
+    validateChange(r.row);
+    check(r.row.position <= orderedU64(h.control.moderation), 'archive_future_policy');
   } else {
     fields(r.row, ['epoch','control','at_ms']);
     smallText(r.row.control, 16384); u64(r.row.at_ms);
@@ -175,7 +172,7 @@ export async function validateRecord(value: unknown, h: Header): Promise<Record>
   return r;
 }
 export async function initial(h: Header): Promise<Progress> {
-  return { count: '0', chain: await digest(canonical(h)), order: '', accepted: '0', debit: '0',
+  return { count: '0', chain: await digest(canonical(h)), order: '', moderation: '0', accepted: '0', debit: '0',
     reserved: '0', bodies: '0', published: '0', cuts: '0' };
 }
 export async function advance(p: Progress, r: Record, line: string): Promise<Progress> {
@@ -190,11 +187,15 @@ export async function advance(p: Progress, r: Record, line: string): Promise<Pro
     q.accepted = nextU64(q.accepted); q.debit = String(BigInt(q.debit) + BigInt(r.row.debit));
     if (r.row.kind === 'sea') q.published = nextU64(q.published);
   }
+  if (r.type === 'moderation') {
+    check(r.row.position === orderedU64(nextU64(q.moderation)), 'archive_policy_gap');
+    q.moderation = nextU64(q.moderation);
+  }
   if (r.type === 'cuts') { check(r.row.epoch === orderedU64(q.cuts), 'archive_cut_gap'); q.cuts = nextU64(q.cuts); }
   return q;
 }
 export function complete(h: Header, p: Progress, footer: End) {
   check(p.count === footer.count && p.chain === footer.chain, 'archive_incomplete');
-  check(p.accepted === h.control.accepted && p.debit === h.control.acceptedDebit
+  check(p.moderation === h.control.moderation && p.accepted === h.control.accepted && p.debit === h.control.acceptedDebit
     && p.bodies === p.published && p.reserved === h.control.reservedBytes && p.cuts === nextU64(h.epoch), 'archive_accounting');
 }

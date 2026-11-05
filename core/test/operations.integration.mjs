@@ -26,7 +26,7 @@ test('backup-only credential exports suppressed bytes but cannot mutate, inspect
   assert.match(await readFile(h.archive, 'utf8'), /a quiet fern/);
   assert.equal((await stat(h.archive)).mode & 0o777, 0o600);
   assert.equal((await stat(h.witness)).mode & 0o777, 0o600);
-  for (const [path, method] of [['/admin/pause', 'POST'], ['/admin/suppress', 'POST'], ['/admin/restore/begin', 'POST'],
+  for (const [path, method] of [['/admin/pause', 'POST'], ['/admin/suppress', 'POST'], ['/admin/block-author', 'POST'], ['/admin/policy', 'GET'], ['/admin/restore/begin', 'POST'],
     ['/admin/inspect?table=control', 'GET'], ['/admin/recovery/status', 'GET'], ['/admin/snapshot/header?epoch=0', 'POST']]) {
     const r = await h.request(path, { method, headers: { Authorization: 'Bearer ' + backupToken }, ...(method === 'POST' ? { body: '{}' } : {}) });
     assert.equal(r.status, 404, path); assert.equal(r.headers.get('Access-Control-Allow-Origin'), null);

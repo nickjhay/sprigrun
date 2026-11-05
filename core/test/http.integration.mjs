@@ -344,3 +344,33 @@ test('duplicate source replies link one mirrored receipt, never acknowledge the 
     await bad(request(mf, '/sea', { method: 'POST', body: action, headers: { 'Sprig-Signature': signature } }), 404, 'unavailable');
     await bad(request(mf, '/receipt' + first.result), 404);
 });
+
+test('operator author blocks preserve historical signatures, meter rejected attempts and expose a bounded policy cursor', async t => {
+    const mf = use(t), c = client(mf), pair = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+    const key = (await c.publish('/sea', keyRecordBytes(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))))).result;
+    const creation = actionBytes({ destination: origin + '/plot/policy_test', author: key, body: new Uint8Array() }, origin);
+    const plot = await c.publish('/plot/policy_test', creation, await signAction(creation, pair.privateKey, origin));
+    const bytes = actionBytes({ destination: origin + '/chat' + plot.result, author: plot.result, body: textBytes('before') }, origin);
+    const signature = await signAction(bytes, pair.privateKey, origin), sent = await c.publish('/chat' + plot.result, bytes, signature);
+    const evidence = await ok(request(mf, '/evidence' + sent.result));
+    await c.blockAuthor(key, true);
+    assert.equal(await ok(request(mf, '/evidence' + sent.result)), evidence);
+    assert.equal((await c.publish('/chat' + plot.result, bytes, signature)).receipt, sent.receipt);
+    const next = actionBytes({ destination: origin + sent.result, author: key, body: textBytes('after') }, origin);
+    await bad(request(mf, sent.result, { method: 'POST', body: next,
+        headers: { 'Sprig-Signature': await signAction(next, pair.privateKey, origin) } }), 403, 'author_blocked');
+    await bad(request(mf, '/admin/block-author', { method: 'POST', body: JSON.stringify({ key, blocked: false }) }), 404);
+    await bad(request(mf, '/admin/policy'), 404);
+    await c.blockAuthor(key, true); // No duplicate policy fact for an unchanged decision.
+    let feed = await c.policyPage();
+    assert.equal(feed.status.applied, '1'); assert.equal(feed.changes[0].effect, 'block');
+    await c.suppress(key, true);
+    for (const prefix of ['/action', '/receipt', '/evidence']) await bad(request(mf, prefix + sent.result), 404);
+    await bad(request(mf, '/chat' + plot.result, { method: 'POST', body: bytes,
+        headers: { 'Sprig-Signature': signature } }), 404); // Exact-retry receipt is not a visibility bypass.
+    for (let i = 0; i < 40; i++) await c.blockAuthor(key, i % 2 === 1);
+    feed = await c.policyPage(); assert.equal(feed.changes.length, 32); assert.equal(feed.more, true);
+    const rest = await c.policyPage(feed.after);
+    assert.equal(rest.more, false); assert.equal(rest.after, rest.status.applied);
+    assert.equal((await inspect(mf, 'moderation')).rows.length, 32);
+});
