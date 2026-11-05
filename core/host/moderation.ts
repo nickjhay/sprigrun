@@ -51,6 +51,7 @@ export class Moderation {
   apply(changes: readonly PolicyChange[]) {
     check(Array.isArray(changes) && changes.length <= POLICY_BATCH, 'policy_batch_limit');
     const c = this.db.control(), before = c.moderation;
+    check(c.barrier?.phase !== 'held', 'barrier_held');
     for (const change of changes) {
       validateChange(change);
       if (change.position <= orderedU64(c.moderation)) {

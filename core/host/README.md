@@ -187,3 +187,12 @@ acknowledging. Gaps, conflicting duplicates, future/backwards epochs and invalid
 schemas fail. Identical delayed delivery never rewinds a decision. The policy
 cursor is internal; it is not a global order of public submissions. The operator
 feed and status are available at `/admin/policy?after=0`.
+
+## Fixed-roster barrier laboratory
+
+[D1](../BARRIER.md) adds immutable partition bindings, exact divided budgets and a
+durable hold separate from manual pause. The global controller publishes all
+acknowledged cuts before any participant releases. Lost replies and restarts are
+covered against real SQLite/R2. It adds no R2 operation to ordinary publication.
+Public routing remains single-shard; whole-cluster restore and cross-owner
+references must precede enabling sharded HTTP.

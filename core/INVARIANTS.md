@@ -120,3 +120,19 @@ operations. The protocol demo and frozen fixtures make none of those claims.
   authority. Public evidence and exact-retry receipts cannot bypass hiding.
 - Direct result reads use retained accepted state, never a discovery listing as
   proof of acceptance. Future cross-owner reads must retain this trust boundary.
+
+## Fixed-roster barrier obligations (D1 laboratory)
+
+- Partition capacity and refill sums equal the global policy, including remainders.
+- Persist and check topology/member/journal identity; missing data cannot silently
+  bootstrap a fresh writer. Initialize only over pristine members.
+- A durable hold gates every recoverable mutation and attempt debit, with no R2
+  await in the transaction. Private uploads do not postpone the boundary.
+- Cut each member once; publish the complete manifest before releasing anyone.
+  Fetch release evidence from the trusted controller and compare the local cut.
+- Replay lost replies and restart at each stage without undoing manual pause,
+  duplicating cuts or reopening an incomplete manifest.
+- Preserve barrier facts in full/delta archives; refuse standalone shard recovery
+  release until a whole-cluster procedure exists. Public sharded HTTP stays off.
+
+See [BARRIER.md](BARRIER.md) for scope, failure evidence and D2 completion gates.

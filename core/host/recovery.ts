@@ -1,3 +1,4 @@
+import { same } from './topology.ts';
 import { check, nextU64, orderedU64, textBytes, u64, utf8 } from '../src/bytes.ts';
 import { verifyAction, plotBindingBytes } from '../src/authority.ts';
 import { receiptForAction } from '../src/receipt.ts';
@@ -53,7 +54,8 @@ export class Recovery {
   private async expanded(h: Header, i: ChangeIndex): Promise<Record> {
     const position = i.position;
     let r: Record;
-    if (i.kind === 'pause') {
+    if (i.kind === 'barrier') r = { type: 'barrier', position, state: JSON.parse(i.key) };
+    else if (i.kind === 'pause') {
       check(i.key === '0' || i.key === '1', 'archive_pause');
       r = { type: 'pause', position, paused: i.key === '1' };
     }
@@ -93,6 +95,7 @@ export class Recovery {
   async begin(headerLine: string, footerLine: string, target?: string) {
     const header = validateHeader(parseLine(headerLine)), footer = end(parseLine(footerLine));
     target ??= footer.chain; hash(target);
+    check(same(header.control.partition, this.db.control().partition), 'restore_partition_mismatch');
     check(header.control.origin === this.db.control().origin, 'archive_origin');
     check(canonical(header.policy) === canonical(this.p), 'restore_policy_mismatch');
     let s = this.session();
@@ -195,7 +198,7 @@ export class Recovery {
         check(!last || last.epoch <= v.epoch, 'archive_policy_epoch_rewound');
         if (parseReference(v.path).kind !== 'sea') this.existing(v.path, orderedU64(s.progress.epoch));
       }
-      if (record.type !== 'pause') {
+      if (record.type !== 'pause' && record.type !== 'barrier') {
         const r = record.row, columns = Object.keys(r), values = columns.map(k => (r as { [key: string]: SqlStorageValue })[k]!);
         this.db.sql.exec(`INSERT INTO ${record.type} (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`, ...values);
       }
@@ -223,6 +226,7 @@ export class Recovery {
     await this.ctx.storage.sync(); return this.status();
   }
   async release(chain: string, confirmation: string) {
+    check(this.db.control().partition === null, 'cluster_recovery_required');
     const s = this.session(); check(s && ['restored', 'released'].includes(s.phase), 'restore_not_complete');
     check(chain === s.target && s.footer.chain === s.target && confirmation === 'history-reconciled', 'restore_history_confirmation');
     if (s.phase !== 'released') this.ctx.storage.transactionSync(() => {

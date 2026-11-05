@@ -48,6 +48,7 @@ export class TestCoordinator extends NativeCoordinator {
     else if (command === 'release') { this.release?.(); this.release = null; this.hold = null; }
     else if (command === 'waiting') return this.waiting;
     else if (command === 'fail') this.fail = true;
+    else if (command === 'journal-identity') { const c = this.db.control(); c.journal = value.journal; this.db.save(c); }
     else if (command === 'journal-position') {
       const c = this.db.control(); c.position = value.position; this.db.save(c);
     }

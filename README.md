@@ -166,3 +166,6 @@ Interactive and visual browser QA of the new overlay also remains pending: the a
 HTML revalidates; built scripts, CSS, workers and the Moss adapter use content-hashed names with immutable caching. The blob-store's private browser-cache policy stays separate. Keep old release assets when deploying if old open tabs should continue using them.
 
 Read **DESIGN.md** for the updated architecture, **RUNTIME.md** for the runtime adapter/I/O contract, and **SECURITY.md** for precise boundaries and limits. This package keeps the future Sprig VM integration separate from the working toy language.
+
+The two-participant snapshot barrier has a local restart drill: `npm run demo:barrier`.
+See [the barrier guide](core/BARRIER.md) for implemented invariants and the remaining sharding work.
