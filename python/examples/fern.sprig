@@ -1,0 +1,2 @@
+#!sprig.run/spec/sprig/0.1
+"room for " + "another fern" if 1 + 2 == 3 else "winter"
