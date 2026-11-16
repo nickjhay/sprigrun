@@ -30,7 +30,9 @@ already exists. A pending publisher does **not** reserve the name.
 
 The initial candidate is `0.1.0a1`. The workflow tests and builds from the selected
 main commit, checks metadata, installs the built wheel in a fresh environment,
-then uploads that same artifact. The first successful upload creates the project.
+and runs its tests including the bundled loopback test server, then uploads that
+same artifact. No access to the hosting repository is needed. The first successful
+upload creates the project.
 Do not publish a throwaway file just to claim the name. PyPI release filenames
 cannot be reused; use a new version for corrections. Keep CLI version metadata
 and `pyproject.toml` synchronized (the installed-wheel smoke check verifies this).

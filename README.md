@@ -7,6 +7,11 @@ sprig**: a bounded expression evaluator with verified source loading by hash or
 fixed publication name. It runs with Python 3.10+ and no Cloudflare or Node runtime.
 This is a separate, deliberately tiny language slice; it does not yet embed the
 native Sprig VM or replace Moss in the browser workbench.
+It includes a standalone, read-only Python test server for loading source by hash
+and publication name. The host's separate `npm run test:python-client` check runs
+the Python client against the full local native HTTP service. It uses `python/src`
+in this combined checkout; set `SPRIGRUN_PYTHON` to a Python executable with the
+runner installed to exercise a separately released client instead.
 
 The new [native-core protocol slice](core/README.md) implements the proposed
 `sprig.run` reference grammar, metadata-first signed actions, fixed plot authors,
