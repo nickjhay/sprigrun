@@ -1,14 +1,13 @@
 from contextlib import redirect_stderr, redirect_stdout
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 from pathlib import Path
 import tempfile
-import threading
 import unittest
 
 from sprigrun import SprigError
 from sprigrun.cli import main
 from sprigrun.source import address, address_length, fetch, origin_url, reference_path, verify
+from sprigrun.testserver import TestServer
 
 SOURCE = b"#!sprig.run/spec/sprig/0.1\n1 + 2\n"
 ADDRESS = address(SOURCE)
@@ -53,39 +52,19 @@ class Sources(unittest.TestCase):
 class RemoteSources(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.routes = {}
-        cls.requests = []
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                cls.requests.append(self.path)
-                status, data, headers = cls.routes.get(self.path, (404, b"missing", {}))
-                self.send_response(status)
-                self.send_header("Content-Length", str(len(data)))
-                for key, value in headers.items():
-                    self.send_header(key, value)
-                self.end_headers()
-                self.wfile.write(data)
-
-            def log_message(self, *args):
-                pass
-
-        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        cls.thread.start()
-        cls.origin = f"http://127.0.0.1:{cls.server.server_port}"
+        cls.server = TestServer().__enter__()
+        cls.routes = cls.server.routes
+        cls.requests = cls.server.requests
+        cls.origin = cls.server.origin
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.server.server_close()
-        cls.thread.join()
+        cls.server.__exit__()
 
     def setUp(self):
         self.routes.clear()
         self.requests.clear()
-        self.routes["/sea/" + ADDRESS] = (200, SOURCE, {})
-        self.routes["/grove/fern.0"] = (200, ("/sea/" + ADDRESS + "\n").encode(), {})
+        self.server.add_source(SOURCE, "/grove/fern.0")
 
     def test_hash_and_named_source(self):
         for ref in (ADDRESS, "/sea/" + ADDRESS, "/grove/fern.0", self.origin + "/grove/fern.0"):
@@ -93,7 +72,7 @@ class RemoteSources(unittest.TestCase):
                 result = fetch(ref, self.origin)
                 self.assertEqual(result.data, SOURCE)
                 self.assertEqual(result.address, ADDRESS)
-        self.assertEqual(self.requests[-2:], ["/grove/fern.0", "/sea/" + ADDRESS])
+        self.assertEqual(list(self.requests)[-2:], ["/grove/fern.0", "/sea/" + ADDRESS])
 
     def test_corruption_and_limits(self):
         for data in (SOURCE[:-1], SOURCE + b"x", SOURCE.replace(b"2", b"3")):
@@ -113,7 +92,7 @@ class RemoteSources(unittest.TestCase):
             self.requests.clear()
             self.routes["/grove/fern.0"] = (303, b"", {"Location": location})
             self.assertRaises(SprigError, fetch, "/grove/fern.0", self.origin)
-            self.assertEqual(self.requests, ["/grove/fern.0"])
+            self.assertEqual(list(self.requests), ["/grove/fern.0"])
 
     def test_cli_and_no_unverified_output(self):
         with tempfile.TemporaryDirectory() as folder:

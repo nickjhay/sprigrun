@@ -2,9 +2,9 @@ name: Python package
 on:
   push:
     branches: [main]
-    paths: ['python/**', 'core/**', '.github/workflows/python.yml', '.github/workflows/publish-python.yml']
+    paths: ['python/**', '.github/workflows/python.yml', '.github/workflows/publish-python.yml']
   pull_request:
-    paths: ['python/**', 'core/**', '.github/workflows/python.yml', '.github/workflows/publish-python.yml']
+    paths: ['python/**', '.github/workflows/python.yml', '.github/workflows/publish-python.yml']
 permissions:
   contents: read
 jobs:
@@ -33,11 +33,4 @@ jobs:
           test "$("$RUNNER_TEMP/sprigrun-smoke/bin/sprigrun" eval '1 + 2')" = '3'
           "$RUNNER_TEMP/sprigrun-smoke/bin/python" -m sprigrun --version
           "$RUNNER_TEMP/sprigrun-smoke/bin/python" -c 'import importlib.metadata, sprigrun; assert importlib.metadata.version("sprigrun") == sprigrun.__version__'
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        if: matrix.python == '3.12'
-        with:
-          node-version: '24'
-      - name: Verify compatibility with the native HTTP core
-        if: matrix.python == '3.12'
-        working-directory: .
-        run: npm ci --no-audit --no-fund && node python/test-core.mjs
+          "$RUNNER_TEMP/sprigrun-smoke/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/python/tests" -v

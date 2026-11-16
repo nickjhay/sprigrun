@@ -24,6 +24,53 @@ These print `3` and `'room for another fern'`. Once the first release is publish
 `python3 -m pip install sprigrun` will install it from PyPI instead.
 `python3 -m sprigrun` is also available in the environment where it is installed.
 
+## A small server to explore locally
+
+The wheel and source release include a standalone **Python test server**. In the
+environment where you installed the package, start it in one terminal:
+
+```sh
+python -m sprigrun.testserver
+```
+
+It serves a small fern at `http://127.0.0.1:8789`, prints its hash address and
+publication name, and lists its paths at `/`. In another terminal:
+
+```sh
+sprigrun run-ref /grove/fern.0 --origin http://127.0.0.1:8789
+```
+
+That prints `'room for another fern'`. You can also use the printed `hash_length`
+with `run-ref` or `fetch`. To serve your own source under a fixed name:
+
+```sh
+python -m sprigrun.testserver example.sprig --name /grove/example.0 --port 8790
+```
+
+Use `--port 0` to choose an available port. With the repository venv above, replace
+`python` and `sprigrun` with `.venv/bin/python` and `.venv/bin/sprigrun`.
+The server binds only to `127.0.0.1` and stops with Ctrl+C. It keeps exact bytes in
+memory, serves `GET`/`HEAD`, and rejects HTTP writes. Nothing persists after exit.
+It implements the runner's read contract, without accounts, signatures, quotas,
+or any dependency on Cloudflare or the hosting repository. It is for local
+testing; it is not a deployment server.
+
+Tests can also use it directly:
+
+```python
+from sprigrun.source import fetch
+from sprigrun.testserver import TestServer
+
+with TestServer() as server:  # loopback, automatically chosen port
+    digest = server.add_source(b"1 + 2\n", "/grove/sum.0")
+    assert fetch("/grove/sum.0", server.origin).address == digest
+```
+
+Seed sources before sending requests. Multiple names can refer to the same blob;
+a name cannot be reassigned to different bytes. The fixture's `routes` mapping
+also permits deliberate response overrides for testing corrupt hashes, excessive
+bodies, redirects and other client rejection paths.
+
 ## Sources, names and servers
 
 ```sh
@@ -118,15 +165,13 @@ python3 -m build
 python3 -m twine check --strict dist/*
 ```
 
-The HTTP tests run a loopback fixture, including corruption, bounds, rejected
-redirects, named resolution and CLI execution. CI also installs the wheel outside
-the checkout and exercises the console script. See [RELEASING.md](RELEASING.md)
-for the manual PyPI Trusted Publisher setup and release workflow.
-
-Maintainers with Node 24 and the root npm dependencies can additionally run
-`node python/test-core.mjs` from the repository root. It publishes the fern to a
-disposable local native HTTP core on port 18789, then loads and runs it through
-the Python client by hash and name. CI runs this compatibility check too.
+The HTTP tests use the included test server, covering corruption, bounds, rejected
+redirects, named resolution and CLI execution. CI installs the wheel outside the
+checkout and reruns the tests, including starting the packaged server as a separate
+process. The package's tests and publishing workflow need only Python. See
+[RELEASING.md](RELEASING.md) for the manual PyPI Trusted Publisher setup and release
+workflow. Compatibility checks against the full hosting implementation belong to
+that implementation's test suite.
 
 Next: integrate a versioned native/WASM Sprig runtime behind this CLI. Keep exact
 source addressing and the distinction between loading bytes and running them.
