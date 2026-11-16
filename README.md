@@ -2,6 +2,12 @@
 
 A local and deployable source workbench: write code, run it with terminal I/O, publish its exact bytes, and load more code by `sha256_length`. The included **Moss/1** interpreter is a deliberately small test language written in TypeScript and shipped as JavaScript. It is not an implementation of Sprig.
 
+The [Python `sprigrun` alpha](python/README.md) introduces **Sprig 0.1, the smallest
+sprig**: a bounded expression evaluator with verified source loading by hash or
+fixed publication name. It runs with Python 3.10+ and no Cloudflare or Node runtime.
+This is a separate, deliberately tiny language slice; it does not yet embed the
+native Sprig VM or replace Moss in the browser workbench.
+
 The new [native-core protocol slice](core/README.md) implements the proposed
 `sprig.run` reference grammar, metadata-first signed actions, fixed plot authors,
 and receipt-based append continuation. `npm run demo:core` runs its offline

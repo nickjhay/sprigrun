@@ -11,6 +11,8 @@ dist/
 .openai/
 .DS_Store
 __pycache__/
+.venv/
+*.egg-info/
 .pytest_cache/
 .env.*
 !.env.example

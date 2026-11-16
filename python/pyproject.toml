@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sprigrun"
+version = "0.1.0a1"
+description = "The smallest Sprig: bounded expressions and verified source loading"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Programming Language :: Python :: 3 :: Only",
+]
+
+[project.urls]
+Homepage = "https://sprig.run/"
+Source = "https://github.com/nickjhay/sprigrun"
+Issues = "https://github.com/nickjhay/sprigrun/issues"
+
+[project.scripts]
+sprigrun = "sprigrun.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sprigrun"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/examples", "/README.md", "/RELEASING.md", "/pyproject.toml"]
